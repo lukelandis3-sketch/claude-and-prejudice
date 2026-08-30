@@ -133,13 +133,17 @@ class IsolatedStateCase(unittest.TestCase):
             env=environment, timeout=30,
         )
 
-    def seed_stream(self, lines, mode="timer", dwell=8, paused=False, statusline=True):
+    def seed_stream(self, lines, mode="timer", dwell=8, paused=False, statusline=True,
+                    wpm=None):
         """Install a synthetic reading stream without going through an importer."""
         self.tbstate.save_item("test-item", {"title": "Test Item", "kind": "book"}, lines)
         self.tbstate.save_queue({"items": ["test-item"]})
         self.tbstate.rebuild_stream()
         config = self.tbstate.load_config()
-        config.update({"mode": mode, "dwell_seconds": dwell, "paused": paused})
+        config.update({
+            "mode": mode, "dwell_seconds": dwell, "paused": paused,
+            "words_per_minute": wpm,
+        })
         config["surfaces"]["statusline"] = statusline
         self.tbstate.save_config(config)
         self.tbstate.write_pos(1)

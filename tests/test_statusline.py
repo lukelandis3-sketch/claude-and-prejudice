@@ -60,6 +60,28 @@ class StatusLineTest(IsolatedStateCase):
             self.assertEqual(self.run_statusline().stdout.strip(), "one")
         self.assertEqual(self.tbstate.read_pos(), 1)
 
+    def test_wpm_gives_longer_fragments_more_time(self):
+        long_line = " ".join("word" for _ in range(20))
+        self.seed_stream(["Heading", long_line, "done"], mode="timer", wpm=60)
+        self.tbstate.write_last_advance(time.time() - 3)
+        self.assertEqual(self.run_statusline().stdout.strip(), long_line)
+        self.assertEqual(self.tbstate.read_pos(), 2)
+
+        self.tbstate.write_last_advance(time.time() - 5)
+        self.assertEqual(self.run_statusline().stdout.strip(), long_line)
+        self.assertEqual(self.tbstate.read_pos(), 2)
+
+    def test_default_wpm_applies_the_short_fragment_floor(self):
+        long_line = "one two three four five six seven eight nine ten " \
+                    "eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty"
+        self.seed_stream(["one two three four five", long_line, "done"],
+                         mode="timer", wpm=250)
+        self.tbstate.write_last_advance(time.time() - 2)
+        self.assertEqual(self.run_statusline().stdout.strip(), long_line)
+        self.tbstate.write_last_advance(time.time() - 4)
+        self.assertEqual(self.run_statusline().stdout.strip(), long_line)
+        self.assertEqual(self.tbstate.read_pos(), 2)
+
     def test_a_long_idle_costs_one_line_not_hundreds(self):
         self.seed_stream(["l%d" % n for n in range(500)], mode="timer", dwell=1)
         self.tbstate.write_last_advance(time.time() - 86400)
@@ -114,6 +136,11 @@ class StatusLineTest(IsolatedStateCase):
         first = self.run_statusline().stdout.splitlines()[0]
         self.assertIn("timer 12s", first)
         self.assertIn("paused", first)
+
+    def test_hud_names_the_wpm_pace(self):
+        self.seed_stream(["one readable line"], mode="timer", wpm=220, paused=True)
+        self._enable_hud()
+        self.assertIn("220 wpm", self.run_statusline().stdout.splitlines()[0])
 
     def test_hud_missing_from_an_old_generation_falls_back_to_the_book_line(self):
         self.seed_stream(["one"], mode="manual")
@@ -215,6 +242,39 @@ class StatusLineTest(IsolatedStateCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stderr, "")
 
+    def test_corrupt_zero_padded_wpm_never_breaks_the_status_line(self):
+        self.seed_stream(["one", "two"], mode="timer", wpm=250)
+        hot = self.tbstate.path("hot.env")
+        with open(hot) as fh:
+            contents = fh.read()
+        self.tbstate.atomic_write(hot, contents.replace("TB_WPM='250'", "TB_WPM='00'"))
+        result = self.run_statusline()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout.strip(), "one")
+
+    def test_huge_corrupt_wpm_preserves_a_wrapped_status_line(self):
+        self.seed_stream(["one"], mode="timer", wpm=250)
+        self._wrap("echo 'my own status line'")
+        hot = self.tbstate.path("hot.env")
+        with open(hot) as fh:
+            contents = fh.read()
+        self.tbstate.atomic_write(
+            hot, contents.replace("TB_WPM='250'", "TB_WPM='999999999999999999999'"))
+        result = self.run_statusline()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout.splitlines(), ["my own status line", "one"])
+
+    def test_corrupt_zero_padded_shard_word_count_is_not_fatal(self):
+        self.seed_stream(["one"], mode="timer", wpm=250)
+        shard = os.path.join(self.tbstate.stream_generation_dir(), "0.txt")
+        self.tbstate.atomic_write(shard, "099\tone\n")
+        result = self.run_statusline()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout.strip(), "one")
+
     def test_no_state_at_all_exits_zero_and_is_silent(self):
         import shutil
         shutil.rmtree(self.tbstate.home())
@@ -234,6 +294,7 @@ class StatusLineTest(IsolatedStateCase):
             source = fh.read()
         self.assertNotIn('cat "$TB_DIR/pos"', source)
         self.assertNotIn("tr -d", source)
+        self.assertNotIn("for _word in $LINE", source)
 
     def test_empty_stream_prints_nothing(self):
         self.tbstate.save_queue({"items": []})

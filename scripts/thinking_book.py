@@ -256,17 +256,23 @@ def _json_export_kind(path):
 def cmd_add(args):
     """One front door: URL, supported local file/export, or Gutenberg search."""
     if not args:
-        raise SystemExit("usage: /book add <title|url|file>")
+        raise SystemExit("usage: /book add <title|url|file>; guided picker: /thinking-book:setup")
     target = " ".join(args).strip()
     if re.match(r"^https?://", target, re.I):
         return cmd_read([target])
+    if target.casefold().startswith("file://"):
+        from urllib.parse import unquote, urlsplit
+        parsed = urlsplit(target)
+        if parsed.netloc not in ("", "localhost"):
+            raise SystemExit("remote file URL is not supported: %s" % target)
+        target = unquote(parsed.path)
 
     path = os.path.abspath(os.path.expanduser(target))
     suffix = os.path.splitext(path)[1].lower()
     path_shaped = (target.startswith(("/", "./", "../", "~")) or suffix in {
         ".epub", ".txt", ".csv", ".json", ".mobi", ".azw", ".azw3", ".kfx",
     })
-    if os.path.exists(path):
+    if os.path.isfile(path):
         if suffix == ".csv":
             return cmd_readwise([path])
         if suffix == ".json":
@@ -277,6 +283,8 @@ def cmd_add(args):
                 return cmd_libby([path])
             raise SystemExit("unrecognized JSON export: %s" % path)
         return cmd_load([path])
+    if os.path.exists(path) and path_shaped:
+        raise SystemExit("not a readable file: %s" % path)
     if path_shaped:
         raise SystemExit("no such file: %s" % path)
     return cmd_gutenberg([target])
@@ -685,6 +693,13 @@ def _display_title(item_id, title):
     return " ".join(str(title or "").split()) or item_id
 
 
+def _pace_label(config):
+    if config["mode"] != "timer":
+        return config["mode"]
+    return ("%s wpm" % config["words_per_minute"] if config.get("words_per_minute")
+            else "timer %ss" % config["dwell_seconds"])
+
+
 def _queue_entries(rows=None):
     """Human-facing queue state, derived once for status, listing, and selection."""
     rows = tbstate.load_index() if rows is None else rows
@@ -737,13 +752,15 @@ def _resolve_queue_item(query, rows=None):
 
 def cmd_dashboard(args):
     """A compact control panel for a bare `/book`, without making the model improvise."""
+    details = "--details" in args
     config = tbstate.load_config()
     entries = _queue_entries()
     active = next((entry for entry in entries if entry["active"]), None)
     queue_ids = tbstate.load_queue()["items"]
     indexed_ids = {entry["id"] for entry in entries}
     unavailable = [item_id for item_id in queue_ids if item_id not in indexed_ids]
-    print("thinking-book %s" % version())
+    if details or not active:
+        print("thinking-book %s" % version())
     if not active:
         if unavailable:
             print("\n%d queued item%s unavailable; run /book queue to inspect or remove %s."
@@ -769,7 +786,7 @@ def cmd_dashboard(args):
         state = "reading (spinner only)"
     else:
         state = "reading"
-    pace = "timer %ss" % config["dwell_seconds"] if config["mode"] == "timer" else config["mode"]
+    pace = _pace_label(config)
     print("\n%s" % heading)
     print("%s %d/%d (%d%%) · %s · %s" % (
         tbstate.progress_bar(active["offset"], active["length"]),
@@ -779,10 +796,12 @@ def cmd_dashboard(args):
     print("Current: %s" % (current_line() or "(blank)"))
     import shlex
     import shutil
-    if shutil.which("tb"):
+    short_tb = shutil.which("tb")
+    bundled_tb = os.path.join(plugin_root(), "bin", "tb")
+    if short_tb and os.path.realpath(short_tb) == os.path.realpath(bundled_tb):
         controls = "Next: !tb n · Back: !tb b"
     else:
-        tb_command = shlex.quote(os.path.join(plugin_root(), "bin", "tb"))
+        tb_command = shlex.quote(bundled_tb)
         controls = ("Next: !%s n · Back: !%s b · Shorter: /book install-cli"
                     % (tb_command, tb_command))
     if not (surfaces["statusline"] or surfaces["spinner"]):
@@ -792,8 +811,8 @@ def cmd_dashboard(args):
     else:
         controls += " · Pause: /book pause"
     print("\n%s" % controls)
-    print("Switch: /book queue · Display: /book display · Setup: /thinking-book:setup")
-    if "--details" in args:
+    print("Library: /book queue · Display: /book display · More: /book help")
+    if details:
         print("Surfaces: statusline=%s spinner=%s hud=%s" % (
             "on" if surfaces["statusline"] else "off",
             "on" if surfaces["spinner"] else "off",
@@ -804,7 +823,6 @@ def cmd_dashboard(args):
             for entry in entries:
                 marker = "->" if entry["active"] else "  "
                 print("  %d. %s %s" % (entry["number"], marker, entry["title"]))
-    print("All commands: /book help")
 
 
 def _turn(steps):
@@ -827,14 +845,27 @@ def _turn(steps):
         print(line or "Nothing queued -- try /book add <title|url|file>.")
 
 
+def _integer_arg(args, usage, minimum=1, maximum=None):
+    try:
+        value = int(args[0]) if len(args) == 1 and args[0].isdigit() else minimum - 1
+    except ValueError:
+        value = minimum - 1
+    if value < minimum or (maximum is not None and value > maximum):
+        raise SystemExit(usage)
+    return value
+
+
+def _page_count(args, command):
+    return 1 if not args else _integer_arg(
+        args, "usage: /book %s [positive line count]" % command)
+
+
 def cmd_next(args):
-    steps = int(args[0]) if args and args[0].lstrip("-").isdigit() else 1
-    _turn(steps)
+    _turn(_page_count(args, "next"))
 
 
 def cmd_back(args):
-    steps = int(args[0]) if args and args[0].lstrip("-").isdigit() else 1
-    _turn(-abs(steps))
+    _turn(-_page_count(args, "back"))
 
 
 def cmd_status(_args):
@@ -932,12 +963,27 @@ def cmd_mode(args):
     print("Advance mode: %s" % args[0])
 
 
+def cmd_pace(args):
+    wpm = _integer_arg(
+        args, "usage: /book pace <30-1000 words-per-minute>", 30, 1000)
+    if tbstate.stream_count() and not tbstate.stream_has_word_counts():
+        with tbstate.locked():
+            logical = tbstate.capture_position()
+            old_items = list(tbstate.load_queue()["items"])
+            tbstate.rebuild_stream()
+            tbstate.restore_position(logical, old_items=old_items)
+    config = tbstate.update_config(lambda live: live.update({"words_per_minute": wpm}))
+    message = "Timer pace: %d words per minute." % wpm
+    if config["mode"] != "timer":
+        message += " Timer mode is off -- run /book mode timer to use it."
+    print(message)
+
+
 def cmd_dwell(args):
-    if not args or not args[0].isdigit():
-        raise SystemExit("usage: /book dwell <seconds>")
-    config = tbstate.update_config(
-        lambda live: live.update({"dwell_seconds": max(1, int(args[0]))})
-    )
+    seconds = _integer_arg(args, "usage: /book dwell <seconds>", 0)
+    config = tbstate.update_config(lambda live: live.update({
+        "dwell_seconds": max(1, seconds), "words_per_minute": None,
+    }))
     print("Timer mode will turn the page every %d seconds." % config["dwell_seconds"])
 
 
@@ -995,7 +1041,7 @@ def cmd_reader(_args):
         position, total = tbstate.read_pos(), tbstate.stream_count()
         current = tbstate.item_at(position)
         title = _display_title(current[1], current[3]) if current else None
-        return (current_line(), title, position, total, config["mode"])
+        return (current_line(), title, position, total, _pace_label(config))
 
     def advance(step):
         advance_by(step)
@@ -1042,11 +1088,11 @@ def cmd_version(_args):
 
 def print_help():
     print("Read something now: /book add <title|url|file>")
-    print("Then: /book status · /book queue · /book open <number-or-title> · /book pause")
+    print("Read: /book status · /book pause|resume · /book next|back [line count]")
+    print("Pace: /book pace <wpm> · fixed seconds: /book dwell <seconds> · mode timer|turn|manual")
     print("Display: /book display hud|line|spinner|off · guided setup: /thinking-book:setup")
-    print("Library: /book queue rm <number-or-title> · /book queue clear")
-    print("Sources: read <url> · clippings <file> · readwise <export> · libby <export> · feed")
-    print("All commands: %s" % ", ".join(sorted(COMMANDS)))
+    print("Library: /book queue · /book open <number-or-title> · /book queue rm <book>")
+    print("More: /book feed · /book reader · /book install-cli · /book repair · /book version")
 
 
 def cmd_help(_args):
@@ -1101,7 +1147,8 @@ def cmd_sync(args):
     tbstate.write_hot_env(config)
     generation_dir = tbstate.stream_generation_dir()
     if (tbstate.stream_count() == 0 or not tbstate.stream_generation()
-            or not generation_dir or not os.path.isdir(generation_dir)):
+            or not generation_dir or not os.path.isdir(generation_dir)
+            or (config.get("words_per_minute") and not tbstate.stream_has_word_counts())):
         with tbstate.locked():
             tbstate.rebuild_stream()
     sync_spinner(config)
@@ -1135,7 +1182,8 @@ def cmd_advance(args):
         if not last:
             # Cold start: show this line and start the clock rather than skipping it.
             tbstate.write_last_advance()
-        elif time.time() - last >= config["dwell_seconds"]:
+        elif time.time() - last >= tbstate.timer_interval(
+                tbstate.stream_record(tbstate.read_pos())[0], config):
             advance_by(1)
     sync_spinner(config)
     _report(args, current_line() or "Nothing queued.")
@@ -1151,7 +1199,7 @@ COMMANDS = {
     "add": cmd_add, "load": cmd_load, "gutenberg": cmd_gutenberg, "libby": cmd_libby,
     "clippings": cmd_clippings, "readwise": cmd_readwise, "read": cmd_read,
     "feed": cmd_feed, "queue": cmd_queue, "open": cmd_open, "status": cmd_status, "mode": cmd_mode,
-    "dwell": cmd_dwell, "pause": cmd_pause, "resume": cmd_resume, "pane": cmd_pane,
+    "pace": cmd_pace, "dwell": cmd_dwell, "pause": cmd_pause, "resume": cmd_resume, "pane": cmd_pane,
     "on": cmd_on, "off": cmd_off, "next": cmd_next, "back": cmd_back, "line": cmd_line,
     "repair": cmd_repair, "refresh": cmd_refresh, "hud": cmd_hud, "display": cmd_display,
     "version": cmd_version, "help": cmd_help,
@@ -1204,8 +1252,7 @@ def main(argv):
     if stray:
         print("ignoring what looks like a second slash command (%s) -- send one command "
               "per message." % stray[0], file=sys.stderr)
-        keep = 2 if argv[0] in PATH_COMMANDS else 1
-        argv = argv[:keep] + [a for a in argv[keep:] if not _looks_like_a_slash_command(a)]
+        argv = argv[:argv.index(stray[0])]
 
     if not argv:
         cmd_dashboard([])

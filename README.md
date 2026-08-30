@@ -51,7 +51,7 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 | `/book open <number-or-title>` | Switch books; each one keeps its own bookmark |
 | `/book queue rm <number-or-title>` | Remove a book and continue at the next one |
 | `/book mode timer\|turn\|manual` | How pages turn (below) |
-| `/book dwell <seconds>` | Reading pace for timer mode (default 8) |
+| `/book pace <wpm>` | Set the timer's reading speed (default 250 WPM) |
 | `/book pause` / `/book resume` | Freeze on a line, or carry on |
 | `/book display hud\|line\|spinner\|off` | Choose where and how the book appears |
 | `/book on` / `/book off` | Enable reading, or restore every setting it touched |
@@ -64,7 +64,7 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 `/book display hud` adds a precomputed progress row above the prose:
 
 ```
-📖 Moby-Dick · ████░░░░░░ 124/310 (40%) · timer 8s
+📖 Moby-Dick · ████░░░░░░ 124/310 (40%) · 250 wpm
 Call me Ishmael.
 ```
 
@@ -140,8 +140,14 @@ Adjust the path to wherever the plugin is installed.
 
 ### Advance modes
 
-- **`timer`** (default) — pages turn on the clock, at most one line per refresh. Walking
-  away for an hour costs you one line, not four hundred.
+- **`timer`** (default) — each fragment stays up for its word count at 250 WPM, with a
+  two-second minimum for short headings. It advances at most once per status-line refresh,
+  so quiet turns read slower than the nominal pace and walking away never skips hundreds
+  of lines. `/book pace <wpm>` adjusts it; `/book dwell <seconds>` remains available for a
+  fixed interval.
+
+Existing installations keep their fixed-second pace until you run `/book pace 250` or
+choose timer mode again in guided setup.
 - **`turn`** — exactly one line per assistant turn, regardless of how long it took.
 - **`manual`** — the line holds until you type `/n`.
 
@@ -190,13 +196,13 @@ a *single-element* list — random-of-one is deterministic — and rewrites it a
 Settings files are watched, so the change lands without a restart.
 
 The status line is the livelier surface. Claude Code re-runs a `statusLine` command **once
-per assistant message**, so it updates several times inside a single turn. `statusline.sh`
+per assistant message**, so it can update several times inside a single turn. `statusline.sh`
 is the hot path: no Python, no JSON parsing, no full-file scans — Python pre-chunks
 immutable 256-line shards and publishes them through one atomic generation pointer. The
 shell reads one prose shard and, only when the HUD is enabled, one matching metadata shard.
 Across 100 invocations on the development Mac at line 25,000 of 25,000, compact manual mode
-measured 9.04 ms median (10.11 ms p95); the graphical HUD measured 11.64 ms median
-(12.72 ms p95), against a 5 s timeout.
+measured 8.85 ms median (10.24 ms p95); the graphical HUD measured 10.94 ms median
+(12.39 ms p95), against a 5 s timeout.
 
 State lives in `~/.claude/thinking-book/`. JSON files are the human-readable record;
 flat one-value files (`pos`, `last`, `count`, `hot.env`) and immutable stream shards keep

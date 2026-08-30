@@ -46,6 +46,13 @@ class HookTest(IsolatedStateCase):
         self.assertEqual(self.tbstate.stream_line(1), "one")
         self.assertEqual(self.run_statusline().stdout.strip(), "one")
 
+    def test_sync_upgrades_legacy_shards_when_wpm_is_enabled(self):
+        self.seed_stream(["one two three"], mode="timer", wpm=250)
+        marker = os.path.join(self.tbstate.stream_generation_dir(), "format")
+        os.unlink(marker)
+        self.run_cli("sync", "--quiet")
+        self.assertTrue(self.tbstate.stream_has_word_counts())
+
     # -------------------------------------------------------------------- Stop: turn
 
     def test_turn_mode_advances_exactly_one_line_per_stop(self):
@@ -106,6 +113,17 @@ class HookTest(IsolatedStateCase):
 
     def test_timer_mode_advances_on_stop_when_status_line_is_off(self):
         self.seed_stream(["one", "two"], mode="timer", dwell=1, statusline=False)
+        self.tbstate.write_last_advance(time.time() - 5)
+        self.run_cli("advance")
+        self.assertEqual(self.pos(), 2)
+
+    def test_stop_uses_word_count_when_status_line_is_off(self):
+        long_line = " ".join("word" for _ in range(20))
+        self.seed_stream(["Heading", long_line, "done"], mode="timer",
+                         statusline=False, wpm=60)
+        self.tbstate.write_last_advance(time.time() - 3)
+        self.run_cli("advance")
+        self.assertEqual(self.pos(), 2)
         self.tbstate.write_last_advance(time.time() - 5)
         self.run_cli("advance")
         self.assertEqual(self.pos(), 2)
@@ -225,6 +243,8 @@ class HookTest(IsolatedStateCase):
         result = self.run_cli("help")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Read something now", result.stdout)
+        self.assertNotIn("refresh-feeds", result.stdout)
+        self.assertNotIn("All commands:", result.stdout)
 
     def test_setup_uses_unified_add_and_display_commands(self):
         path = os.path.join(support.REPO, "commands", "setup.md")
@@ -232,7 +252,10 @@ class HookTest(IsolatedStateCase):
             source = fh.read()
         self.assertIn("`add", source)
         self.assertIn("`display", source)
+        self.assertIn("`pace 250", source)
         self.assertNotIn("`pane on", source)
+        self.assertIn("no more than three decisions", source)
+        self.assertNotIn("`dwell", source)
 
     def test_manual_hook_does_not_rewrite_an_unchanged_spinner(self):
         self.seed_stream(["one"], mode="manual")

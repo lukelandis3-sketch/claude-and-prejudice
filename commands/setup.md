@@ -16,23 +16,24 @@ re-run either dynamic command later:
 
 !`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/thinking_book.py" status`
 
-Then use AskUserQuestion to collect no more than four decisions:
+Then use AskUserQuestion to collect no more than three decisions:
 
-1. What to read: keep the current book, Gutenberg, EPUB/plain-text file, web article,
-   Kindle My Clippings, Readwise, or Libby. If a query, URL, or path was supplied above,
-   infer this choice and do not ask it again. Otherwise use a follow-up picker whose Other
-   response can carry the search query, URL, or path.
-2. Page turning: timer, once per completed Claude turn, or manual.
+1. What to read: keep the current book or add something. If a query, URL, or path was
+   supplied above, use it without asking again. Otherwise ask for one title, URL, or file
+   path and let `add` detect its source; never ask the user to identify the file format.
+2. Page turning: timer at the 250-words-per-minute default, once per completed Claude turn, or
+   manual.
 3. Display: graphical HUD plus spinner, compact book line plus spinner, or spinner only.
-4. If timer mode was chosen, pace: 5, 8, 12, or 20 seconds.
 
 The version output contains a `running from` absolute path. Append
 `/scripts/thinking_book.py` and run only that CLI; never edit Claude configuration files.
-Summarize the choices, then apply at most these three commands:
+Summarize the choices, then apply at most these four commands:
 
 1. `add "<title, URL, or path>"` unless keeping the current book.
 2. `display hud|line|spinner`.
-3. `mode timer|turn|manual`, followed by `dwell <seconds>` only for timer mode.
+3. `mode timer|turn|manual`.
+4. `pace 250` when timer mode was chosen, so upgraded fixed-second installations adopt
+   the current default too.
 
 Quote user input as one argument. On failure, show the exact useful error and stop; never
 claim success or retry a network request without asking.

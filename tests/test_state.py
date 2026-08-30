@@ -33,6 +33,18 @@ class StreamTest(IsolatedStateCase):
         self.assertEqual(self.tbstate.stream_line(1), "a1")
         self.assertEqual(self.tbstate.stream_line(3), "b1")
 
+    def test_generation_shards_precompute_word_counts_but_api_returns_only_prose(self):
+        self.tbstate.save_item("a", {"title": "A"}, ["one two three"])
+        self.tbstate.save_queue({"items": ["a"]})
+        self.tbstate.rebuild_stream()
+        generation = self.tbstate.stream_generation_dir()
+        with open(os.path.join(generation, "0.txt")) as fh:
+            self.assertEqual(fh.readline(), "3\tone two three\n")
+        with open(os.path.join(generation, "format")) as fh:
+            self.assertEqual(fh.read().strip(), "2")
+        self.assertEqual(self.tbstate.stream_record(1), (3, "one two three"))
+        self.assertEqual(self.tbstate.stream_line(1), "one two three")
+
     def test_count_cache_matches_stream(self):
         self.seed_stream(["one", "two", "three"])
         self.assertEqual(self.tbstate.stream_count(), 3)
@@ -112,6 +124,16 @@ class ConfigTest(IsolatedStateCase):
         self.tbstate.atomic_write(self.tbstate.path("config.json"), "{ not json")
         self.assertEqual(self.tbstate.load_config()["mode"], "timer")
 
+    def test_new_install_defaults_to_a_comprehension_oriented_wpm(self):
+        self.assertEqual(self.tbstate.load_config()["words_per_minute"], 250)
+
+    def test_legacy_dwell_config_keeps_fixed_seconds(self):
+        self.tbstate.write_json(
+            self.tbstate.path("config.json"), {"mode": "timer", "dwell_seconds": 12})
+        config = self.tbstate.load_config()
+        self.assertIsNone(config["words_per_minute"])
+        self.assertEqual(config["dwell_seconds"], 12)
+
     def test_valid_non_object_config_falls_back_to_defaults(self):
         self.tbstate.write_json(self.tbstate.path("config.json"), ["not", "an", "object"])
         self.assertEqual(self.tbstate.load_config(), self.tbstate.DEFAULT_CONFIG)
@@ -140,6 +162,13 @@ class ConfigTest(IsolatedStateCase):
         self.tbstate.save_config(config)
         with open(self.tbstate.path("hot.env")) as fh:
             self.assertIn("TB_HUD=1", fh.read())
+
+    def test_wpm_is_mirrored_to_the_hot_cache(self):
+        config = self.tbstate.load_config()
+        config["words_per_minute"] = 250
+        self.tbstate.save_config(config)
+        with open(self.tbstate.path("hot.env")) as fh:
+            self.assertIn("TB_WPM='250'", fh.read())
 
     def test_non_boolean_hud_config_falls_back_to_off(self):
         for bad in ("off", 1, ["on"], None):

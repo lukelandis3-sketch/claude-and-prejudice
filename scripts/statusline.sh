@@ -51,12 +51,25 @@ fi
 
 TB_MODE=timer
 TB_DWELL=8
+TB_WPM=0
 TB_PAUSED=0
 TB_STATUSLINE=1
 TB_PREFIX=''
 TB_HUD=0
 # shellcheck disable=SC1090
 . "$TB_DIR/hot.env" 2>/dev/null || true
+
+WPM_OK=0
+case "$TB_WPM" in
+    ''|0*|*[!0-9]*) TB_WPM=0 ;;
+    *)
+        if [ "${#TB_WPM}" -le 4 ] && [ "$TB_WPM" -le 1000 ]; then
+            WPM_OK=1
+        else
+            TB_WPM=0
+        fi
+        ;;
+esac
 
 # Presence means this surface has actually run in the current Claude Code session. The
 # SessionStart hook removes it. A statusLine settings entry alone is not proof of life:
@@ -98,37 +111,73 @@ fi
 
 [ "$POS" -lt 1 ] && POS=1
 
+LINE=''
+WORDS=1
+SHARD=0
+ROW=0
+load_line() {
+    LINE=''
+    WORDS=1
+    if [ "$TB_STATUSLINE" = "1" ] && [ -n "$STREAM_DIR" ] && [ "$POS" -le "$COUNT" ]; then
+        SHARD=$(((POS - 1) / 256))
+        ROW=$(((POS - 1) % 256 + 1))
+        RECORD=$(sed -n "${ROW}{p;q;}" "$STREAM_DIR/$SHARD.txt" 2>/dev/null) || RECORD=''
+        TAB='	'
+        case "$RECORD" in
+            [0-9]*"$TAB"*)
+                WORDS=${RECORD%%"$TAB"*}
+                LINE=${RECORD#*"$TAB"}
+                case "$WORDS" in ''|0*|*[!0-9]*) WORDS=1 ;; esac
+                [ "${#WORDS}" -gt 4 ] && WORDS=1000
+                [ "$WORDS" -gt 1000 ] 2>/dev/null && WORDS=1000
+                ;;
+            *) LINE=$RECORD ;;
+        esac
+    fi
+    return 0
+}
+[ "$WPM_OK" = "1" ] && load_line
+
 # Timer mode: the page turns on the clock, one line per invocation at most, so walking
 # away for an hour costs one line rather than four hundred.
 if [ "$TB_STATUSLINE" = "1" ] && [ "$TB_PAUSED" = "0" ] && [ "$TB_MODE" = "timer" ] && [ "$COUNT" -gt 0 ]; then
+    INTERVAL=$TB_DWELL
+    if [ "$WPM_OK" = "1" ]; then
+        INTERVAL=$(((WORDS * 60 + TB_WPM - 1) / TB_WPM))
+        [ "$INTERVAL" -lt 2 ] && INTERVAL=2
+        [ "$INTERVAL" -gt 30 ] && INTERVAL=30
+    fi
     NOW=$(date +%s 2>/dev/null || echo 0)
     if [ "$LAST" -eq 0 ]; then
         # Cold start: no clock yet. Show this line and start the timer, rather than
         # treating the page as infinitely overdue and skipping the opening line.
         printf '%s\n' "$NOW" > "$TB_DIR/last.tmp.$$" 2>/dev/null &&
             mv "$TB_DIR/last.tmp.$$" "$TB_DIR/last" 2>/dev/null
-    elif [ "$NOW" -gt 0 ] && [ $((NOW - LAST)) -ge "$TB_DWELL" ]; then
+    elif [ "$NOW" -gt 0 ] && [ $((NOW - LAST)) -ge "$INTERVAL" ]; then
         if [ "$POS" -lt "$COUNT" ]; then
             POS=$((POS + 1))
             printf '%s\n' "$POS" > "$TB_DIR/pos.tmp.$$" 2>/dev/null &&
                 mv "$TB_DIR/pos.tmp.$$" "$TB_DIR/pos" 2>/dev/null
+            load_line
         fi
         printf '%s\n' "$NOW" > "$TB_DIR/last.tmp.$$" 2>/dev/null &&
             mv "$TB_DIR/last.tmp.$$" "$TB_DIR/last" 2>/dev/null
     fi
 fi
 
-LINE=''
+[ "$WPM_OK" = "0" ] && load_line
+
 HUD=''
 if [ "$TB_STATUSLINE" = "1" ] && [ -n "$STREAM_DIR" ] && [ "$POS" -le "$COUNT" ]; then
-    SHARD=$(((POS - 1) / 256))
-    ROW=$(((POS - 1) % 256 + 1))
-    LINE=$(sed -n "${ROW}{p;q;}" "$STREAM_DIR/$SHARD.txt" 2>/dev/null) || LINE=''
     if [ "$TB_HUD" = "1" ]; then
         HUD=$(sed -n "${ROW}{p;q;}" "$STREAM_DIR/$SHARD.hud" 2>/dev/null) || HUD=''
         if [ -n "$HUD" ]; then
             if [ "$TB_MODE" = "timer" ]; then
-                HUD="$HUD · timer ${TB_DWELL}s"
+                if [ "$WPM_OK" = "1" ]; then
+                    HUD="$HUD · ${TB_WPM} wpm"
+                else
+                    HUD="$HUD · timer ${TB_DWELL}s"
+                fi
             else
                 HUD="$HUD · $TB_MODE"
             fi

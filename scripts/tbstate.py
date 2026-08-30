@@ -22,6 +22,7 @@ from contextlib import contextmanager
 DEFAULT_CONFIG = {
     "mode": "timer",            # timer | turn | manual
     "dwell_seconds": 8,
+    "words_per_minute": 250,     # None preserves the legacy fixed-second timer
     "paused": False,
     "surfaces": {"statusline": True, "spinner": True},
     "wrapped_statusline": None,  # the user's own statusLine command, if we wrapped one
@@ -32,6 +33,7 @@ DEFAULT_CONFIG = {
 
 VALID_MODES = ("timer", "turn", "manual")
 STREAM_SHARD_LINES = 256
+STREAM_FORMAT = "2"  # word-count prefix + tab + prose
 
 
 def config_dir():
@@ -145,6 +147,8 @@ def write_json(target, data):
 
 def load_config():
     config = read_json(path("config.json"), DEFAULT_CONFIG)
+    legacy_fixed = (isinstance(config, dict) and "dwell_seconds" in config
+                    and "words_per_minute" not in config)
     if not isinstance(config, dict):
         config = {}
     merged = json.loads(json.dumps(DEFAULT_CONFIG))
@@ -155,6 +159,14 @@ def load_config():
         merged["dwell_seconds"] = max(1, int(merged.get("dwell_seconds", 8)))
     except (TypeError, ValueError):
         merged["dwell_seconds"] = DEFAULT_CONFIG["dwell_seconds"]
+    if legacy_fixed:
+        merged["words_per_minute"] = None
+    elif merged.get("words_per_minute") is not None:
+        try:
+            merged["words_per_minute"] = max(
+                30, min(1000, int(merged["words_per_minute"])))
+        except (TypeError, ValueError):
+            merged["words_per_minute"] = DEFAULT_CONFIG["words_per_minute"]
     surfaces = merged.get("surfaces")
     surfaces = surfaces if isinstance(surfaces, dict) else {}
     merged["surfaces"] = {
@@ -180,6 +192,7 @@ def write_hot_env(config):
     lines = [
         "TB_MODE=%s" % _shell_quote(config["mode"]),
         "TB_DWELL=%s" % _shell_quote(int(config["dwell_seconds"])),
+        "TB_WPM=%s" % _shell_quote(int(config.get("words_per_minute") or 0)),
         "TB_PAUSED=%s" % ("1" if config["paused"] else "0"),
         "TB_STATUSLINE=%s" % ("1" if config["surfaces"]["statusline"] else "0"),
         "TB_PREFIX=%s" % _shell_quote(config.get("prefix") or ""),
@@ -247,6 +260,19 @@ def stream_generation_dir(generation=None):
     return path("stream-generations", generation) if generation else ""
 
 
+def stream_has_word_counts(generation=None):
+    directory = stream_generation_dir(generation)
+    return bool(directory and _read(os.path.join(directory, "format"), "").strip()
+                == STREAM_FORMAT)
+
+
+def _decode_stream_record(record):
+    prefix, separator, prose = record.partition("\t")
+    if separator and prefix.isdigit():
+        return min(1000, max(1, int(prefix))), prose
+    return min(1000, max(1, len(record.split()))), record
+
+
 def stream_count():
     """Line count of the reading stream, from the cache written by rebuild_stream."""
     raw = _read(path("count"), "").strip()
@@ -259,10 +285,10 @@ def stream_count():
         return 0
 
 
-def stream_line(index):
-    """1-based lookup into the reading stream. Empty string when out of range."""
+def stream_record(index):
+    """Return (word count, prose) for a 1-based stream position."""
     if index < 1:
-        return ""
+        return 0, ""
     generation = stream_generation()
     if generation:
         shard = (index - 1) // STREAM_SHARD_LINES
@@ -272,19 +298,24 @@ def stream_line(index):
             with open(target, encoding="utf-8") as fh:
                 for number, line in enumerate(fh, 1):
                     if number == row:
-                        return line.rstrip("\n")
+                        return _decode_stream_record(line.rstrip("\n"))
         except OSError:
-            return ""
-        return ""
+            return 0, ""
+        return 0, ""
     # Migration fallback: SessionStart rebuilds old streams into a generation.
     try:
         with open(stream_path(), encoding="utf-8") as fh:
             for number, line in enumerate(fh, 1):
                 if number == index:
-                    return line.rstrip("\n")
+                    return _decode_stream_record(line.rstrip("\n"))
     except OSError:
-        return ""
-    return ""
+        return 0, ""
+    return 0, ""
+
+
+def stream_line(index):
+    """1-based prose lookup. Empty string when out of range."""
+    return stream_record(index)[1]
 
 
 def load_queue():
@@ -322,6 +353,16 @@ def progress_bar(offset, total, width=10):
     offset = max(1, min(int(offset), total))
     filled = max(1, min(width, (offset * width) // total))
     return "█" * filled + "░" * (width - filled)
+
+
+def timer_interval(words, config):
+    """Seconds for this fragment: word-proportional WPM, bounded for readable UI."""
+    wpm = config.get("words_per_minute")
+    if not wpm:
+        return max(1, int(config.get("dwell_seconds") or 1))
+    words = max(1, int(words or 1))
+    seconds = (words * 60 + int(wpm) - 1) // int(wpm)
+    return max(2, min(30, seconds))
 
 
 def _hud_title(item_id, title, limit=38):
@@ -376,11 +417,14 @@ def _publish_stream_generation(lines, hud_rows):
     generation = "%x-%x" % (time.time_ns(), os.getpid())
     target = os.path.join(root, generation)
     os.makedirs(target)
+    atomic_write(os.path.join(target, "format"), STREAM_FORMAT + "\n")
     for start in range(0, len(lines), STREAM_SHARD_LINES):
         shard = lines[start:start + STREAM_SHARD_LINES]
+        records = ["%d\t%s" % (min(1000, max(1, len(line.split()))), line)
+                   for line in shard]
         atomic_write(
             os.path.join(target, "%d.txt" % (start // STREAM_SHARD_LINES)),
-            "\n".join(shard) + "\n",
+            "\n".join(records) + "\n",
         )
         if hud_rows is not None:
             atomic_write(

@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 import time
 import unittest
 
@@ -114,7 +115,22 @@ class RoundTripTest(IsolatedStateCase):
         self.assertIn("Next: !", dashboard.stdout)
         self.assertIn("install-cli", dashboard.stdout)
         self.assertIn(os.path.join(support.REPO, "bin", "tb"), dashboard.stdout)
-        self.assertIn("/thinking-book:setup", dashboard.stdout)
+        self.assertIn("More: /book help", dashboard.stdout)
+        self.assertNotIn("All commands:", dashboard.stdout)
+        self.assertNotIn("thinking-book 0.", dashboard.stdout)
+
+    def test_dashboard_ignores_an_unrelated_tb_executable(self):
+        fake_bin = os.path.join(self.config_dir, "fake-bin")
+        os.makedirs(fake_bin)
+        fake_tb = os.path.join(fake_bin, "tb")
+        with open(fake_tb, "w") as fh:
+            fh.write("#!/bin/sh\necho unrelated\n")
+        os.chmod(fake_tb, 0o755)
+        self.run_cli("load", self.book)
+
+        dashboard = self.run_cli("", env={"PATH": fake_bin})
+        self.assertIn(os.path.join(support.REPO, "bin", "tb"), dashboard.stdout)
+        self.assertNotIn("Next: !tb n", dashboard.stdout)
 
     def test_add_accepts_an_unquoted_file_path_with_spaces(self):
         directory = os.path.join(self.config_dir, "My Books")
@@ -125,6 +141,35 @@ class RoundTripTest(IsolatedStateCase):
         result = self.run_cli("add " + path)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("short story", result.stdout)
+
+    def test_add_accepts_a_percent_encoded_file_url(self):
+        path = os.path.join(self.config_dir, "a book.txt")
+        with open(path, "w") as fh:
+            fh.write("A readable sentence loaded from a pasted file URL.")
+        result = self.run_cli("add", Path(path).as_uri())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("a book", result.stdout)
+
+    def test_add_rejects_a_directory_with_a_useful_error(self):
+        result = self.run_cli("add", self.config_dir)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not a readable file", result.stderr)
+
+    def test_bare_title_matching_a_directory_still_searches_gutenberg(self):
+        import thinking_book
+        directory = os.path.join(self.config_dir, "Dracula")
+        os.makedirs(directory)
+        called = []
+        original = thinking_book.cmd_gutenberg
+        previous = os.getcwd()
+        thinking_book.cmd_gutenberg = lambda args: called.append(args)
+        try:
+            os.chdir(self.config_dir)
+            thinking_book.cmd_add(["Dracula"])
+        finally:
+            os.chdir(previous)
+            thinking_book.cmd_gutenberg = original
+        self.assertEqual(called, [["Dracula"]])
 
     def test_add_auto_detects_readwise_csv_and_libby_json(self):
         csv_path = os.path.join(self.config_dir, "readwise.csv")
@@ -171,6 +216,35 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(self.settings()["statusLine"], original)
         self.assertEqual(self.settings()["theme"], "dark")
 
+    def test_pace_switches_timer_to_words_per_minute(self):
+        self.run_cli("mode", "manual")
+        result = self.run_cli("pace", "180")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tbstate.load_config()["words_per_minute"], 180)
+        self.assertIn("180 words per minute", result.stdout)
+        self.assertIn("/book mode timer", result.stdout)
+
+        self.run_cli("dwell", "7")
+        config = self.tbstate.load_config()
+        self.assertIsNone(config["words_per_minute"])
+        self.assertEqual(config["dwell_seconds"], 7)
+
+    def test_enabling_pace_upgrades_legacy_stream_shards(self):
+        self.run_cli("load", self.book)
+        marker = os.path.join(self.tbstate.stream_generation_dir(), "format")
+        if os.path.exists(marker):
+            os.unlink(marker)
+        result = self.run_cli("pace", "250")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(os.path.join(self.tbstate.stream_generation_dir(), "format")) as fh:
+            self.assertEqual(fh.read().strip(), "2")
+
+    def test_invalid_pace_has_a_stable_usage_error(self):
+        for value in ("fast", "0", "9" * 5000):
+            result = self.run_cli("pace", value)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("usage: /book pace", result.stderr)
+
     def test_manual_turn_reports_book_changes_and_stream_boundaries(self):
         self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1"])
         self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1"])
@@ -187,6 +261,16 @@ class RoundTripTest(IsolatedStateCase):
         self.tbstate.write_pos(1)
         beginning = self.run_cli("back")
         self.assertIn("Beginning of Alpha", beginning.stdout)
+
+    def test_invalid_page_counts_do_not_move_the_bookmark(self):
+        self.run_cli("load", self.book)
+        self.tbstate.write_pos(2)
+        for command, value in (("next", "later"), ("next", "-2"),
+                               ("back", "0"), ("back", "2 extra")):
+            result = self.run_cli(command, value)
+            self.assertEqual(result.returncode, 1, (command, value, result.stderr))
+            self.assertIn("positive line count", result.stderr)
+            self.assertEqual(self.tbstate.read_pos(), 2)
 
     def test_dashboard_off_state_points_to_on_instead_of_pause(self):
         self.run_cli("load", self.book)
