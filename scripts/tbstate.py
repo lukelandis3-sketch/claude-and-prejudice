@@ -76,6 +76,25 @@ def atomic_write(target, text):
         raise
 
 
+def atomic_write_bytes(target, data):
+    """Binary twin of atomic_write, used when byte-for-byte preservation matters."""
+    directory = os.path.dirname(target) or "."
+    os.makedirs(directory, exist_ok=True)
+    handle, tmp = tempfile.mkstemp(dir=directory, prefix=".tb-", suffix=".tmp")
+    try:
+        with os.fdopen(handle, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 @contextmanager
 def locked(name="tb.lock"):
     """Advisory lock so concurrent Claude Code sessions cannot interleave writes."""

@@ -95,12 +95,86 @@ class SettingsTest(IsolatedStateCase):
         self.tbsettings.restore_statusline(None)
         self.assertNotIn("statusLine", self.read_settings())
 
-    def test_corrupt_settings_file_is_backed_up_not_propagated(self):
+    def test_corrupt_settings_file_is_preserved_and_refused(self):
         os.makedirs(os.path.dirname(self.tbstate.settings_path()), exist_ok=True)
+        original = b"{ this is not json\n"
         with open(self.tbstate.settings_path(), "w") as fh:
-            fh.write("{ this is not json")
-        self.tbsettings.set_spinner_line("Recovered.")
-        self.assertEqual(self.read_settings()["spinnerVerbs"]["verbs"], ["Recovered."])
+            fh.write(original.decode())
+        with self.assertRaises(self.tbsettings.SettingsError):
+            self.tbsettings.set_spinner_line("Recovered.")
+        with open(self.tbstate.settings_path(), "rb") as fh:
+            self.assertEqual(fh.read(), original)
+
+    def test_non_object_settings_are_preserved_and_refused(self):
+        original = b"[1, 2, 3]\n"
+        os.makedirs(os.path.dirname(self.tbstate.settings_path()), exist_ok=True)
+        with open(self.tbstate.settings_path(), "wb") as fh:
+            fh.write(original)
+        with self.assertRaises(self.tbsettings.SettingsError):
+            self.tbsettings.set_spinner_line("No overwrite.")
+        with open(self.tbstate.settings_path(), "rb") as fh:
+            self.assertEqual(fh.read(), original)
+
+    def test_raw_backup_preserves_exact_original_bytes(self):
+        original = b'{\n  "model" : "opus",\n  "env": {"A": 1}\n}\n'
+        os.makedirs(os.path.dirname(self.tbstate.settings_path()), exist_ok=True)
+        with open(self.tbstate.settings_path(), "wb") as fh:
+            fh.write(original)
+        self.tbsettings.set_spinner_line("A line.")
+        with open(self.tbsettings.raw_backup_path(), "rb") as fh:
+            self.assertEqual(fh.read(), original)
+
+    def test_writing_the_same_spinner_value_is_a_noop(self):
+        self.tbsettings.set_spinner_line("Hold this line.")
+        path = self.tbstate.settings_path()
+        before = os.stat(path)
+        with open(path, "rb") as fh:
+            contents = fh.read()
+        self.tbsettings.set_spinner_line("Hold this line.")
+        after = os.stat(path)
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), contents)
+        self.assertEqual(after.st_ino, before.st_ino)
+
+    def test_clear_preserves_spinner_verbs_changed_after_our_last_write(self):
+        self.tbsettings.set_spinner_line("Our line.")
+        custom = {"mode": "append", "verbs": ["User edit"]}
+        settings = self.read_settings()
+        settings["spinnerVerbs"] = custom
+        self.write_settings(settings)
+        self.tbsettings.clear_spinner()
+        self.assertEqual(self.read_settings()["spinnerVerbs"], custom)
+
+    def test_restore_preserves_statusline_changed_after_our_last_write(self):
+        original = {"type": "command", "command": "before"}
+        self.write_settings({"statusLine": original})
+        self.tbsettings.set_statusline("ours")
+        newer = {"type": "command", "command": "after"}
+        self.write_settings({"statusLine": newer})
+        self.tbsettings.restore_statusline(original)
+        self.assertEqual(self.read_settings()["statusLine"], newer)
+
+    def test_present_null_and_falsy_values_restore_exactly(self):
+        for key, setter, clearer in (
+            ("spinnerVerbs", lambda: self.tbsettings.set_spinner_line("ours"),
+             self.tbsettings.clear_spinner),
+            ("statusLine", lambda: self.tbsettings.set_statusline("ours"),
+             lambda: self.tbsettings.restore_statusline(None)),
+        ):
+            for original in (None, {}, ""):
+                with self.subTest(key=key, original=original):
+                    for name in ("settings.backup.json", "settings.backup.raw",
+                                 "settings.backup.meta.json", "settings.origins.json",
+                                 "settings.written.json"):
+                        try:
+                            os.unlink(self.tbstate.path(name))
+                        except OSError:
+                            pass
+                    self.write_settings({key: original})
+                    setter()
+                    clearer()
+                    self.assertIn(key, self.read_settings())
+                    self.assertEqual(self.read_settings()[key], original)
 
     def test_concurrent_writers_leave_valid_json(self):
         self.write_settings({"model": "opus"})

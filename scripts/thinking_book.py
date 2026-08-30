@@ -315,22 +315,18 @@ def enable_statusline(auto=False):
     never takes over a third-party one without the explicit `pane on` or `on` command.
     Returns (enabled, reason) for the interactive caller's concise notice.
     """
-    existing = as_statusline_entry(tbsettings.current_statusline())
-    if auto and existing and not is_our_statusline(existing):
-        return False, "another status line is already configured"
-
     config = tbstate.load_config()
-    ours = statusline_command()
-    if existing and not is_our_statusline(existing):
-        config["wrapped_statusline"] = existing
+    enabled, original, _settings = tbsettings.install_statusline(
+        statusline_command(), is_our_statusline, auto=auto,
+        refresh_interval=config.get("statusline_refresh_interval"),
+    )
+    if not enabled:
+        return False, "another status line is already configured"
+    if original:
+        config["wrapped_statusline"] = original
     config["surfaces"]["statusline"] = True
     tbstate.save_config(config)
     _write_wrapped(config.get("wrapped_statusline"))
-    padding = existing.get("padding") if existing and not is_our_statusline(existing) else None
-    tbsettings.set_statusline(
-        ours, padding=padding,
-        refresh_interval=config.get("statusline_refresh_interval"),
-    )
     return True, "enabled"
 
 
