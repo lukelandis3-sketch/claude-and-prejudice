@@ -53,6 +53,37 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(final["permissions"], {"allow": ["Bash"]})
         self.assertEqual(self.tbsettings.diff_against_backup(), {})
 
+    def test_first_import_auto_enables_an_empty_statusline(self):
+        loaded = self.run_cli("load", self.book)
+        self.assertEqual(loaded.returncode, 0, loaded.stderr)
+        self.assertIn("Reading surface enabled", loaded.stdout)
+        self.assertIn("statusline.sh", self.settings()["statusLine"]["command"])
+
+    def test_first_import_does_not_auto_wrap_a_third_party_statusline(self):
+        original = {"type": "command", "command": "my-own-prompt", "padding": 1}
+        with open(self.tbstate.settings_path(), "w") as fh:
+            json.dump({"statusLine": original}, fh)
+        loaded = self.run_cli("load", self.book)
+        self.assertEqual(loaded.returncode, 0, loaded.stderr)
+        self.assertIn("already configured", loaded.stdout)
+        self.assertEqual(self.settings()["statusLine"], original)
+
+    def test_on_is_the_inverse_of_off(self):
+        self.run_cli("load", self.book)
+        self.run_cli("off")
+        self.assertFalse(self.tbstate.load_config()["surfaces"]["spinner"])
+
+        enabled = self.run_cli("on")
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        config = self.tbstate.load_config()
+        self.assertFalse(config["paused"])
+        self.assertEqual(config["surfaces"], {"statusline": True, "spinner": True})
+        self.assertIn("spinnerVerbs", self.settings())
+        self.assertIn("statusline.sh", self.settings()["statusLine"]["command"])
+
+        self.run_cli("off")
+        self.assertEqual(self.tbsettings.diff_against_backup(), {})
+
     def test_spinner_verbs_are_always_a_single_element_replace_list(self):
         # Claude Code samples the list at random -- more than one element loses the order.
         self.run_cli("load", self.book)

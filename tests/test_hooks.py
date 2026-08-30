@@ -69,9 +69,21 @@ class HookTest(IsolatedStateCase):
 
     # ------------------------------------------------------------------- Stop: timer
 
-    def test_timer_mode_leaves_advancing_to_the_status_line_when_it_is_on(self):
-        # The status line runs far more often, so Stop must not double-advance.
+    def test_timer_mode_advances_when_statusline_is_configured_but_not_live(self):
+        # A freshly installed statusLine may not mount until restart. Its config flag
+        # alone must not make Stop defer to a surface that has never run this session.
         self.seed_stream(["one", "two"], mode="timer", dwell=0, statusline=True)
+        self.tbstate.write_last_advance(time.time() - 5)
+        self.run_cli("advance")
+        self.assertEqual(self.pos(), 2)
+
+    def test_timer_mode_leaves_advancing_to_a_live_statusline(self):
+        # Once the surface has actually run, Stop must not double-advance.
+        self.seed_stream(["one", "two"], mode="timer", dwell=600, statusline=True)
+        self.tbstate.write_last_advance(time.time())
+        self.run_statusline()
+        self.assertTrue(os.path.exists(self.tbstate.path("statusline.live")))
+        self.tbstate.write_last_advance(time.time() - 1000)
         self.run_cli("advance")
         self.assertEqual(self.pos(), 1)
 
@@ -118,6 +130,12 @@ class HookTest(IsolatedStateCase):
         self.assertIsNotNone(self.spinner_line())
         self.run_cli("restore")
         self.assertNotIn("spinnerVerbs", self.settings())
+
+    def test_sync_clears_the_previous_sessions_statusline_liveness(self):
+        self.seed_stream(["one"])
+        self.tbstate.atomic_write(self.tbstate.path("statusline.live"), "")
+        self.run_cli("sync", "--quiet")
+        self.assertFalse(os.path.exists(self.tbstate.path("statusline.live")))
 
     # ------------------------------------------------------------------- robustness
 

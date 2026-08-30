@@ -118,6 +118,7 @@ def cmd_load(args):
         meta, text = plaintext.load(path)
         item_id = _slug("text", path)
     _install(item_id, meta, text)
+    after_interactive_import()
 
 
 def cmd_gutenberg(args):
@@ -126,6 +127,7 @@ def cmd_gutenberg(args):
     import gutenberg
     meta, text = gutenberg.load(" ".join(args))
     _install(_slug("gutenberg", meta.get("gutenberg_id") or meta.get("source")), meta, text)
+    after_interactive_import()
 
 
 def cmd_libby(args):
@@ -135,6 +137,7 @@ def cmd_libby(args):
     path = os.path.abspath(os.path.expanduser(args[0]))
     meta, text = libby.load(path)
     _install(_slug("libby", path), meta, text)
+    after_interactive_import()
 
 
 def cmd_read(args):
@@ -144,6 +147,7 @@ def cmd_read(args):
     url = args[0]
     meta, text = article.load(url)
     _install(_slug("article", url), meta, text)
+    after_interactive_import()
 
 
 # --------------------------------------------------------------------------- feeds
@@ -304,24 +308,55 @@ def _write_wrapped(entry):
         os.unlink(target)
 
 
+def enable_statusline(auto=False):
+    """Enable the status-line surface through the one self-wrap-safe path.
+
+    Automatic activation is deliberately conservative: it fills an empty statusLine but
+    never takes over a third-party one without the explicit `pane on` or `on` command.
+    Returns (enabled, reason) for the interactive caller's concise notice.
+    """
+    existing = as_statusline_entry(tbsettings.current_statusline())
+    if auto and existing and not is_our_statusline(existing):
+        return False, "another status line is already configured"
+
+    config = tbstate.load_config()
+    ours = statusline_command()
+    if existing and not is_our_statusline(existing):
+        config["wrapped_statusline"] = existing
+    config["surfaces"]["statusline"] = True
+    tbstate.save_config(config)
+    _write_wrapped(config.get("wrapped_statusline"))
+    padding = existing.get("padding") if existing and not is_our_statusline(existing) else None
+    tbsettings.set_statusline(
+        ours, padding=padding,
+        refresh_interval=config.get("statusline_refresh_interval"),
+    )
+    return True, "enabled"
+
+
+def after_interactive_import():
+    """Sync reading surfaces after a person explicitly imports something."""
+    config = tbstate.load_config()
+    if config["paused"] and not any(config["surfaces"].values()):
+        print("thinking-book is off; run /book on when you want to start reading.")
+        return
+
+    sync_spinner(config)
+    if not config["surfaces"]["statusline"]:
+        return
+    enabled, reason = enable_statusline(auto=True)
+    if enabled:
+        print("Reading surface enabled; restart Claude Code once if the status line is not visible yet.")
+    elif reason:
+        print("A status line is already configured; /book pane on will add the book alongside it.")
+
+
 def cmd_pane(args):
     action = (args[0] if args else "on").lower()
     config = tbstate.load_config()
 
     if action == "on":
-        existing = as_statusline_entry(tbsettings.current_statusline())
-        ours = statusline_command()
-        if existing and not is_our_statusline(existing):
-            # Preserve whatever the user already had; statusline.sh will run it too.
-            config["wrapped_statusline"] = existing
-        # If `existing` is already ours, keep whatever we stored the first time and do
-        # not nest. This makes `pane on` idempotent across plugin roots.
-        config["surfaces"]["statusline"] = True
-        tbstate.save_config(config)
-        _write_wrapped(config.get("wrapped_statusline"))
-        padding = existing.get("padding") if existing and not is_our_statusline(existing) else None
-        tbsettings.set_statusline(ours, padding=padding,
-                                  refresh_interval=config.get("statusline_refresh_interval"))
+        enable_statusline(auto=False)
         print("Status line reading surface enabled.")
     elif action == "off":
         config["surfaces"]["statusline"] = False
@@ -519,6 +554,18 @@ def cmd_off(_args):
     print("thinking-book is off. Stock spinner verbs restored." + (" Your status line is back." if wrapped else ""))
 
 
+def cmd_on(_args):
+    """Resume both reading surfaces -- the explicit inverse of `/book off`."""
+    config = tbstate.load_config()
+    config["paused"] = False
+    config["surfaces"] = {"statusline": True, "spinner": True}
+    tbstate.save_config(config)
+    enable_statusline(auto=False)
+    tbstate.write_last_advance()
+    sync_spinner(tbstate.load_config())
+    print("thinking-book is on. Reading surfaces enabled.")
+
+
 def cmd_line(_args):
     line = current_line()
     if line:
@@ -619,6 +666,10 @@ def cmd_sync(args):
     """SessionStart: make sure the plumbing exists, then show where we left off."""
     tbstate.ensure_home()
     tbsettings.ensure_settings_file()
+    try:
+        os.unlink(tbstate.path("statusline.live"))
+    except OSError:
+        pass
     config = tbstate.load_config()
     tbstate.write_hot_env(config)
     if tbstate.stream_count() == 0:
@@ -648,7 +699,7 @@ def cmd_advance(args):
     mode = config["mode"]
     if mode == "turn":
         advance_by(1)
-    elif mode == "timer" and not config["surfaces"]["statusline"]:
+    elif mode == "timer" and not os.path.exists(tbstate.path("statusline.live")):
         last = tbstate.read_last_advance()
         if not last:
             # Cold start: show this line and start the clock rather than skipping it.
@@ -669,7 +720,7 @@ COMMANDS = {
     "load": cmd_load, "gutenberg": cmd_gutenberg, "libby": cmd_libby, "read": cmd_read,
     "feed": cmd_feed, "queue": cmd_queue, "status": cmd_status, "mode": cmd_mode,
     "dwell": cmd_dwell, "pause": cmd_pause, "resume": cmd_resume, "pane": cmd_pane,
-    "off": cmd_off, "next": cmd_next, "back": cmd_back, "line": cmd_line,
+    "on": cmd_on, "off": cmd_off, "next": cmd_next, "back": cmd_back, "line": cmd_line,
     "repair": cmd_repair, "refresh": cmd_refresh, "version": cmd_version,
     "reader": cmd_reader, "install-cli": cmd_install_cli,
     "sync": cmd_sync, "advance": cmd_advance, "restore": cmd_restore,

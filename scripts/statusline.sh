@@ -44,6 +44,13 @@ TB_PREFIX=''
 # shellcheck disable=SC1090
 . "$TB_DIR/hot.env" 2>/dev/null || true
 
+# Presence means this surface has actually run in the current Claude Code session. The
+# SessionStart hook removes it. A statusLine settings entry alone is not proof of life:
+# newly installed commands may not mount until Claude Code restarts.
+if [ "$TB_STATUSLINE" = "1" ] && [ ! -f "$TB_DIR/statusline.live" ]; then
+    : > "$TB_DIR/statusline.live" 2>/dev/null || true
+fi
+
 read_int() {
     value=$(cat "$1" 2>/dev/null | tr -d ' \n\r') || value=''
     case "$value" in
