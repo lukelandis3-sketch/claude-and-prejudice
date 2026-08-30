@@ -1,8 +1,8 @@
 #!/bin/sh
-# Legacy shorthand retained for existing installs and hotkeys. New instructions use the
-# clearer `book` launcher; both forward to the same local, zero-token implementation.
+# Claude & Prejudice's local launcher: `book next`, `book back`, `book reader`,
+# or `book "Pride and Prejudice"` from a terminal outside Claude Code.
 #
-# Resolves its own location through symlinks so it can be linked onto PATH from anywhere.
+# Resolve through symlinks so `book` can live anywhere on PATH.
 
 set -u
 
@@ -11,7 +11,7 @@ hops=0
 while [ -L "$target" ]; do
     hops=$((hops + 1))
     if [ "$hops" -gt 32 ]; then
-        echo "tb: too many symlink hops while resolving the entry point" >&2
+        echo "book: too many symlink hops while resolving the entry point" >&2
         exit 1
     fi
     link=$(readlink "$target") || break
@@ -22,7 +22,7 @@ while [ -L "$target" ]; do
 done
 
 root=$(cd "$(dirname "$target")/.." && pwd) || {
-    echo "tb: cannot resolve the thinking-book directory" >&2
+    echo "book: cannot resolve the Claude & Prejudice directory" >&2
     exit 1
 }
 

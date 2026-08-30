@@ -892,10 +892,10 @@ def _controls_hint(config):
         return "Page turns after each response"
 
     import shutil
-    short_tb = shutil.which("tb")
-    bundled_tb = os.path.join(plugin_root(), "bin", "tb")
-    if short_tb and os.path.realpath(short_tb) == os.path.realpath(bundled_tb):
-        return "Manual controls in another terminal: tb n · tb b"
+    short_book = shutil.which("book")
+    bundled_book = os.path.join(plugin_root(), "bin", "book")
+    if short_book and os.path.realpath(short_book) == os.path.realpath(bundled_book):
+        return "Manual controls in another terminal: book next · book back"
     return ("Next: /thinking-book:n · Back: /thinking-book:b · "
             "External controls: /book install-cli")
 
@@ -1187,15 +1187,15 @@ def cmd_reader(_args):
 
 
 def cmd_install_cli(args):
-    """Symlink bin/tb somewhere on PATH so page turns are `tb n`, not a python3 invocation."""
+    """Symlink the readable `book` launcher somewhere on PATH."""
     target_dir = os.path.abspath(os.path.expanduser(
         args[0] if args else os.path.join("~", ".local", "bin")))
-    source = os.path.join(plugin_root(), "bin", "tb")
+    source = os.path.join(plugin_root(), "bin", "book")
     if not os.path.exists(source):
         raise SystemExit("cannot find %s" % source)
 
     os.makedirs(target_dir, exist_ok=True)
-    link = os.path.join(target_dir, "tb")
+    link = os.path.join(target_dir, "book")
 
     if os.path.islink(link) and os.path.realpath(link) == os.path.realpath(source):
         print("Already installed: %s" % link)
@@ -1209,10 +1209,10 @@ def cmd_install_cli(args):
     path_entries = [os.path.abspath(os.path.expanduser(p))
                     for p in os.environ.get("PATH", "").split(os.pathsep) if p]
     if target_dir not in path_entries:
-        print("Note: %s is not on your PATH. Add it, or symlink tb somewhere that is."
+        print("Note: %s is not on your PATH. Add it, or symlink book somewhere that is."
               % target_dir)
     else:
-        print("Turn the page with `tb n` in another terminal; Claude stays out of it.")
+        print("Use `book next`, `book back`, or `book reader` in another terminal.")
 
 
 def cmd_version(_args):
@@ -1345,7 +1345,7 @@ COMMANDS = {
     "refresh-feeds": cmd_refresh_feeds,
 }
 
-# Brevity is the whole point of `tb`: `tb n` must work, not just `tb next`.
+# Keep the legacy one-letter actions working for existing `tb n` hotkeys.
 COMMANDS["n"] = cmd_next
 COMMANDS["b"] = cmd_back
 

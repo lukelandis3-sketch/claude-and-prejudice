@@ -28,12 +28,12 @@ configured automatically:
 Run `/thinking-book:setup` without an argument to resume, or to see the syntax when no
 book is queued. Setup asks no questions, offers no presets, and never retries a download.
 
-The first successful setup points to the optional one-time local controls. After that,
-books and manual page turns can stay entirely outside the Claude transcript:
+For library management and manual controls outside Claude, install the optional local
+launcher once. Books and page turns can then stay entirely outside the transcript:
 
 ```sh
-tb ~/Books/next.epub             # separate terminal: zero model tokens or conversation context
-tb "Pride and Prejudice"         # title search from a separate terminal
+book ~/Books/next.epub             # zero model tokens or conversation context
+book "Pride and Prejudice"         # title search from a separate terminal
 ```
 
 Or start directly. The plugin detects Gutenberg searches, URLs, EPUB/text files, Kindle
@@ -99,30 +99,31 @@ clutter the transcript.
 ## Local reading without spending a turn
 
 A slash command is a model turn: an assistant response, latency, tokens, and book-keeping
-noise threaded through your actual work. Install the local `tb` launcher once:
+noise threaded through your actual work. Install the local `book` launcher once:
 
 ```sh
-/thinking-book:book install-cli      # symlinks bin/tb into ~/.local/bin
+/thinking-book:book install-cli      # symlinks bin/book into ~/.local/bin
 ```
 
 | How | Cost |
 |---|---|
-| `tb <book>` in another terminal | **Literally zero model tokens and no conversation context.** Import and setup run locally. |
-| `tb n` in another terminal | **Nothing at all.** No turn, no context. |
+| `book <title\|url\|file>` in another terminal | **Literally zero model tokens and no conversation context.** Import and setup run locally. |
+| `book next` / `book back` in another terminal | **Nothing at all.** No turn, no context. |
 | `/thinking-book:n` | A full model turn. Works, but it is the expensive option. |
 
 Claude Code's `!` shell mode records its command and output in the transcript and may lead
 Claude to respond, as shown in real use. It is therefore not presented as a reading control.
+The old `tb` command remains a compatibility alias for existing installs and hotkeys.
 
 ### The reader pane
 
 ```sh
-tb reader
+book reader
 ```
 
 Run it in a split and you get the one-keypress page turn that is impossible inside Claude
 Code itself: **space** or `n` advances, `b` goes back, arrow keys work too, `r` redraws, `q` quits. It shows the line and
-your position, updates when something else moves the bookmark (timer mode or `tb n`), and
+your position, updates when something else moves the bookmark (timer mode or `book next`), and
 writes through to the same position file — so the spinner in the Claude pane follows along on
 its next turn. One bookmark, several windows.
 
@@ -133,10 +134,10 @@ Pair it with `/book mode manual`, or lines will keep advancing on the clock unde
 In tmux, for a page turn that shows you the line without leaving the pane you are in:
 
 ```tmux
-bind -n F8 run-shell 'tmux display-message "$(tb n)"'
+bind -n F8 run-shell 'tmux display-message "$(book next)"'
 ```
 
-Any terminal that can bind a key to a shell command will do the same — `tb n` prints the new
+Any terminal that can bind a key to a shell command will do the same — `book next` prints the new
 line on stdout, so it composes with whatever your emulator offers.
 
 ### A real `/n`

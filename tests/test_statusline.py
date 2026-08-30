@@ -78,7 +78,8 @@ class StatusLineTest(IsolatedStateCase):
                          mode="timer", wpm=250)
         self.tbstate.write_last_advance(time.time() - 2)
         self.assertEqual(" ".join(self.run_statusline().stdout.split()), long_line)
-        self.tbstate.write_last_advance(time.time() - 4)
+        # Stay safely inside the five-second interval after integer timestamp rounding.
+        self.tbstate.write_last_advance(time.time() - 3)
         self.assertEqual(" ".join(self.run_statusline().stdout.split()), long_line)
         self.assertEqual(self.tbstate.read_pos(), 2)
 

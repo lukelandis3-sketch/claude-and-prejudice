@@ -88,7 +88,7 @@ def run(state, on_advance, on_back):
 
     if not sys.stdin.isatty():
         print(state()[0] or "(nothing queued)")
-        print("Not a terminal -- run `tb reader` in a real shell for the pane.",
+        print("Not a terminal -- run `book reader` in a real shell for the pane.",
               file=sys.stderr)
         return 1
 
