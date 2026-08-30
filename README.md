@@ -13,7 +13,7 @@ puts the same line in your status line, where it can turn pages during a turn.
 ## Install
 
 ```
-/plugin marketplace add lukelandis3-sketch/claude-thinking-book
+/plugin marketplace add lukelandis3-sketch/claude-code-page-turner
 /plugin install thinking-book
 ```
 
