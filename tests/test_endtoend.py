@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 import support
 from support import IsolatedStateCase, make_epub
@@ -196,6 +197,180 @@ class RoundTripTest(IsolatedStateCase):
         result = self.run_cli("add", path)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("2 highlight book(s)", result.stdout)
+
+    def test_start_imports_a_chosen_book_and_applies_all_defaults_once(self):
+        result = self.run_cli("start", self.book)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertLessEqual(len(result.stdout.splitlines()), 2, result.stdout)
+        self.assertIn("The Test Voyage", result.stdout)
+        self.assertIn("250 WPM", result.stdout)
+        config = self.tbstate.load_config()
+        self.assertEqual(config["mode"], "timer")
+        self.assertEqual(config["words_per_minute"], 250)
+        self.assertTrue(config["hud"])
+        self.assertEqual(config["surfaces"], {"statusline": True, "spinner": True})
+        self.assertIn("spinnerVerbs", self.settings())
+
+    def test_start_without_a_new_book_keeps_the_current_book(self):
+        self.run_cli("load", self.book)
+        self.run_cli("mode", "manual")
+        self.run_cli("pace", "333")
+        self.run_cli("display", "spinner")
+        before = list(self.tbstate.load_queue()["items"])
+        result = self.run_cli("start")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tbstate.load_queue()["items"], before)
+        self.assertIn("The Test Voyage", result.stdout)
+        config = self.tbstate.load_config()
+        self.assertEqual(config["mode"], "manual")
+        self.assertEqual(config["words_per_minute"], 333)
+        self.assertEqual(config["surfaces"], {"statusline": False, "spinner": True})
+        self.assertNotIn("status line is in use", result.stdout)
+
+    def test_start_switches_to_the_newly_chosen_book(self):
+        self.run_cli("start", self.book)
+        other = os.path.join(self.config_dir, "second.txt")
+        with open(other, "w") as fh:
+            fh.write("This is the second book, selected by the reader.")
+        result = self.run_cli("start", other)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("second", result.stdout.lower())
+        self.assertNotIn("The Test Voyage", result.stdout)
+        active = self.tbstate.item_at(self.tbstate.read_pos())
+        self.assertEqual(active[3].lower(), "second")
+
+    def test_start_reimport_selects_an_existing_inactive_book_without_duplication(self):
+        self.run_cli("start", self.book)
+        other = os.path.join(self.config_dir, "second.txt")
+        with open(other, "w") as fh:
+            fh.write("This is the second book, selected by the reader.")
+        self.run_cli("start", other)
+        before = list(self.tbstate.load_queue()["items"])
+
+        result = self.run_cli("start", self.book)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tbstate.load_queue()["items"], before)
+        self.assertIn("The Test Voyage", result.stdout)
+        self.assertEqual(self.tbstate.item_at(self.tbstate.read_pos())[3], "The Test Voyage")
+
+    def test_start_multi_book_export_uses_import_order_and_reports_the_rest(self):
+        path = os.path.join(self.config_dir, "readwise.csv")
+        with open(path, "w") as fh:
+            fh.write(
+                "Book Title,Author,Highlight\n"
+                "First Choice,A,First highlight.\n"
+                "Second Choice,B,Second highlight.\n"
+            )
+        result = self.run_cli("start", path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("First Choice", result.stdout)
+        self.assertIn("(+1 more)", result.stdout)
+        self.assertEqual(self.tbstate.item_at(self.tbstate.read_pos())[3], "First Choice")
+
+        reversed_path = os.path.join(self.config_dir, "readwise-reversed.csv")
+        with open(reversed_path, "w") as fh:
+            fh.write(
+                "Book Title,Author,Highlight\n"
+                "Second Choice,B,Updated second highlight.\n"
+                "First Choice,A,Updated first highlight.\n"
+            )
+        reversed_result = self.run_cli("start", reversed_path)
+        self.assertEqual(reversed_result.returncode, 0, reversed_result.stderr)
+        self.assertIn("Second Choice", reversed_result.stdout)
+        self.assertEqual(self.tbstate.item_at(self.tbstate.read_pos())[3], "Second Choice")
+
+    def test_start_without_any_book_asks_for_one_concisely(self):
+        result = self.run_cli("start")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("title, URL, or file path", result.stderr)
+        self.assertNotIn("/thinking-book", result.stderr)
+        self.assertLessEqual(len(result.stderr.splitlines()), 1)
+
+    def test_start_does_not_replace_a_third_party_statusline(self):
+        original = {"type": "command", "command": "my-own-prompt", "padding": 1}
+        with open(self.tbstate.settings_path(), "w") as fh:
+            json.dump({"statusLine": original}, fh)
+        result = self.run_cli("start", self.book)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.settings()["statusLine"], original)
+        self.assertEqual(
+            self.tbstate.load_config()["surfaces"],
+            {"statusline": False, "spinner": True},
+        )
+        self.assertIn("/thinking-book:book pane on", result.stdout)
+        self.assertLessEqual(len(result.stdout.splitlines()), 2, result.stdout)
+        generation = self.tbstate.stream_generation_dir()
+        self.assertFalse(os.path.exists(os.path.join(generation, "0.hud")))
+
+        self.run_cli("pane", "on")
+        self.assertTrue(os.path.exists(os.path.join(
+            self.tbstate.stream_generation_dir(), "0.hud")))
+
+    def test_start_reports_partial_success_if_settings_are_broken(self):
+        self.run_cli("start", self.book)
+        other = os.path.join(self.config_dir, "second.txt")
+        with open(other, "w") as fh:
+            fh.write("This is the second book, safely queued before setup fails.")
+        settings_path = self.tbstate.settings_path()
+        broken = b"{ not valid json\n"
+        with open(settings_path, "wb") as fh:
+            fh.write(broken)
+
+        result = self.run_cli("start", other)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Ready", result.stdout + result.stderr)
+        self.assertIn("Queued second, but setup did not finish", result.stderr)
+        with open(settings_path, "rb") as fh:
+            self.assertEqual(fh.read(), broken)
+        self.assertEqual(len(self.tbstate.load_queue()["items"]), 2)
+
+    def test_start_import_failure_preserves_current_book_and_config(self):
+        self.run_cli("start", self.book)
+        active = self.tbstate.read_pos()
+        config = self.tbstate.load_config()
+        result = self.run_cli("start", os.path.join(self.config_dir, "missing.epub"))
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn("Ready", result.stdout + result.stderr)
+        self.assertEqual(self.tbstate.read_pos(), active)
+        self.assertEqual(self.tbstate.load_config(), config)
+
+    def test_start_title_failure_is_attempted_once(self):
+        import thinking_book
+        calls = []
+        original = thinking_book.cmd_gutenberg
+
+        def fail(args, activate=True):
+            calls.append((args, activate))
+            raise TimeoutError("The read operation timed out")
+
+        thinking_book.cmd_gutenberg = fail
+        try:
+            with self.assertRaisesRegex(TimeoutError, "timed out"):
+                thinking_book.cmd_start(["A title"])
+        finally:
+            thinking_book.cmd_gutenberg = original
+        self.assertEqual(calls, [(["A title"], False)])
+
+    def test_concurrent_starts_leave_complete_config_and_valid_settings(self):
+        paths = []
+        for number in (1, 2):
+            path = os.path.join(self.config_dir, "book-%d.txt" % number)
+            with open(path, "w") as fh:
+                fh.write("Readable content for concurrent book %d." % number)
+            paths.append(path)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda path: self.run_cli("start", path), paths))
+        for result in results:
+            self.assertEqual(result.returncode, 0, result.stderr)
+        config = self.tbstate.load_config()
+        self.assertEqual(config["mode"], "timer")
+        self.assertEqual(config["words_per_minute"], 250)
+        self.assertTrue(config["hud"])
+        self.assertTrue(config["surfaces"]["spinner"])
+        self.assertEqual(len(self.tbstate.load_queue()["items"]), 2)
+        self.settings()  # Parses successfully.
 
     def test_display_modes_are_single_commands_and_off_restores_settings(self):
         original = {"type": "command", "command": "my-status"}

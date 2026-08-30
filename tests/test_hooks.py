@@ -258,10 +258,10 @@ class HookTest(IsolatedStateCase):
         path = os.path.join(support.REPO, "commands", "setup.md")
         with open(path) as fh:
             source = fh.read()
-        self.assertIn("allowed-tools: AskUserQuestion, Bash(python3:*)", source)
+        self.assertIn("allowed-tools: Bash(python3:*)", source)
+        self.assertNotIn("AskUserQuestion", source)
         self.assertIn("thinking_book.py", source)
-        self.assertIn("version output contains", source)
-        self.assertIn("spinner only", source)
+        self.assertIn("title, URL, or file path", source)
         self.assertNotIn("settings.json", source)
 
     def test_help_command_prints_task_oriented_help(self):
@@ -271,16 +271,16 @@ class HookTest(IsolatedStateCase):
         self.assertNotIn("refresh-feeds", result.stdout)
         self.assertNotIn("All commands:", result.stdout)
 
-    def test_setup_uses_unified_add_and_display_commands(self):
+    def test_setup_is_one_short_backend_call_with_sensible_defaults(self):
         path = os.path.join(support.REPO, "commands", "setup.md")
         with open(path) as fh:
             source = fh.read()
-        self.assertIn("`add", source)
-        self.assertIn("`display", source)
-        self.assertIn("`pace 250", source)
-        self.assertNotIn("`pane on", source)
-        self.assertIn("no more than three decisions", source)
-        self.assertNotIn("`dwell", source)
+        self.assertIn("`start", source)
+        self.assertIn("run exactly one command", source)
+        self.assertIn("run no tools", source)
+        for forbidden in ("preflight", "preset", "retry", "summary", "dashboard"):
+            self.assertIn(forbidden, source)
+        self.assertLessEqual(len(source.split()), 120)
 
     def test_manual_hook_does_not_rewrite_an_unchanged_spinner(self):
         self.seed_stream(["one"], mode="manual")

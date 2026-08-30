@@ -24,7 +24,7 @@ FEED_REFRESH_SECONDS = 3600
 LIVE_MARKER_MAX_AGE = 30 * 24 * 60 * 60
 MAX_NEW_ITEMS_PER_FEED = 3
 HOOK_COMMANDS = {"sync", "advance", "restore", "refresh-feeds"}
-PATH_COMMANDS = {"add", "load", "libby", "clippings", "readwise"}
+PATH_COMMANDS = {"add", "start", "load", "libby", "clippings", "readwise"}
 
 
 # ------------------------------------------------------------------ small helpers
@@ -165,7 +165,7 @@ def _install_many(kind, items):
     return [row[0] for row in prepared]
 
 
-def cmd_load(args):
+def cmd_load(args, activate=True):
     if not args:
         raise SystemExit("usage: /book load <path.epub|path.txt>")
     path = os.path.abspath(os.path.expanduser(args[0]))
@@ -174,9 +174,10 @@ def cmd_load(args):
 
     if os.path.basename(path).casefold() == "my clippings.txt":
         import clippings
-        _install_many("clippings", clippings.load(path))
-        after_interactive_import()
-        return
+        item_ids = _install_many("clippings", clippings.load(path))
+        if activate:
+            after_interactive_import()
+        return None if activate else item_ids
 
     import epub
     suffix = os.path.splitext(path)[1].lower()
@@ -193,54 +194,69 @@ def cmd_load(args):
         meta, text = plaintext.load(path)
         item_id = _slug("text", path)
     _install(item_id, meta, text)
-    after_interactive_import()
+    if activate:
+        after_interactive_import()
+    return None if activate else [item_id]
 
 
-def cmd_gutenberg(args):
+def cmd_gutenberg(args, activate=True):
     if not args:
         raise SystemExit("usage: /book gutenberg <search terms|id>")
     import gutenberg
     meta, text = gutenberg.load(" ".join(args))
-    _install(_slug("gutenberg", meta.get("gutenberg_id") or meta.get("source")), meta, text)
-    after_interactive_import()
+    item_id = _slug("gutenberg", meta.get("gutenberg_id") or meta.get("source"))
+    _install(item_id, meta, text)
+    if activate:
+        after_interactive_import()
+    return None if activate else [item_id]
 
 
-def cmd_libby(args):
+def cmd_libby(args, activate=True):
     if not args:
         raise SystemExit("usage: /book libby <reading-journey-export.json>")
     import libby
     path = os.path.abspath(os.path.expanduser(args[0]))
     meta, text = libby.load(path)
-    _install(_slug("libby", path), meta, text)
-    after_interactive_import()
+    item_id = _slug("libby", path)
+    _install(item_id, meta, text)
+    if activate:
+        after_interactive_import()
+    return None if activate else [item_id]
 
 
-def cmd_clippings(args):
+def cmd_clippings(args, activate=True):
     if not args:
         raise SystemExit("usage: /book clippings <My Clippings.txt>")
     import clippings
     path = os.path.abspath(os.path.expanduser(args[0]))
-    _install_many("clippings", clippings.load(path))
-    after_interactive_import()
+    item_ids = _install_many("clippings", clippings.load(path))
+    if activate:
+        after_interactive_import()
+    return None if activate else item_ids
 
 
-def cmd_readwise(args):
+def cmd_readwise(args, activate=True):
     if not args:
         raise SystemExit("usage: /book readwise <export.csv|export.json>")
     import readwise
     path = os.path.abspath(os.path.expanduser(args[0]))
-    _install_many("readwise", readwise.load(path))
-    after_interactive_import()
+    item_ids = _install_many("readwise", readwise.load(path))
+    if activate:
+        after_interactive_import()
+    return None if activate else item_ids
 
 
-def cmd_read(args):
+def cmd_read(args, activate=True):
     if not args:
         raise SystemExit("usage: /book read <url>")
     import article
     url = args[0]
     meta, text = article.load(url)
-    _install(_slug("article", url), meta, text)
-    after_interactive_import()
+    item_id = _slug("article", url)
+    _install(item_id, meta, text)
+    if activate:
+        after_interactive_import()
+    return None if activate else [item_id]
 
 
 def _json_export_kind(path):
@@ -268,13 +284,17 @@ def _json_export_kind(path):
     return "libby" if "readingJourney" in payload else None
 
 
-def cmd_add(args):
+def _run_import(handler, args, activate):
+    return handler(args) if activate else handler(args, activate=False)
+
+
+def cmd_add(args, activate=True):
     """One front door: URL, supported local file/export, or Gutenberg search."""
     if not args:
         raise SystemExit("usage: /book add <title|url|file>; guided picker: /thinking-book:setup")
     target = " ".join(args).strip()
     if re.match(r"^https?://", target, re.I):
-        return cmd_read([target])
+        return _run_import(cmd_read, [target], activate)
     if target.casefold().startswith("file://"):
         from urllib.parse import unquote, urlsplit
         parsed = urlsplit(target)
@@ -289,20 +309,82 @@ def cmd_add(args):
     })
     if os.path.isfile(path):
         if suffix == ".csv":
-            return cmd_readwise([path])
+            return _run_import(cmd_readwise, [path], activate)
         if suffix == ".json":
             kind = _json_export_kind(path)
             if kind == "readwise":
-                return cmd_readwise([path])
+                return _run_import(cmd_readwise, [path], activate)
             if kind == "libby":
-                return cmd_libby([path])
+                return _run_import(cmd_libby, [path], activate)
             raise SystemExit("unrecognized JSON export: %s" % path)
-        return cmd_load([path])
+        return _run_import(cmd_load, [path], activate)
     if os.path.exists(path) and path_shaped:
         raise SystemExit("not a readable file: %s" % path)
     if path_shaped:
         raise SystemExit("no such file: %s" % path)
-    return cmd_gutenberg([target])
+    return _run_import(cmd_gutenberg, [target], activate)
+
+
+def cmd_start(args):
+    """Import an optional book and apply the recommended setup in one quiet command."""
+    written = []
+    if args:
+        import contextlib
+        import io
+        # Source-specific commands are useful interactively but noisy in onboarding.
+        # Preserve their errors while replacing success chatter with one stable result.
+        with contextlib.redirect_stdout(io.StringIO()):
+            written = cmd_add(args, activate=False)
+        if written:
+            offset = tbstate.load_bookmarks().get(written[0], 1)
+            position = tbstate.resolve_position(written[0], offset)
+            if position is not None:
+                tbstate.write_pos(position)
+    elif not tbstate.load_queue()["items"]:
+        raise SystemExit("Choose a book: start <title, URL, or file path>")
+
+    current = tbstate.item_at(tbstate.read_pos())
+    title = _display_title(current[1], current[3]) if current else "your book"
+    meta = tbstate.item_meta(current[1]) if current else {}
+    author = meta.get("author") if isinstance(meta, dict) else None
+    label = "%s by %s" % (title, author) if author else title
+
+    try:
+        if args:
+            enabled, _reason = enable_statusline(auto=True)
+            config = tbstate.update_config(lambda live: live.update({
+                "mode": "timer",
+                "words_per_minute": 250,
+                "paused": False,
+                "hud": True,
+                "surfaces": {"statusline": enabled, "spinner": True},
+            }))
+            if enabled:
+                generation_dir = tbstate.stream_generation_dir()
+                if (not generation_dir or not os.path.isfile(
+                        os.path.join(generation_dir, "0.hud"))):
+                    with tbstate.rebuilding_stream(include_hud=True):
+                        pass
+        else:
+            config = tbstate.update_config(lambda live: live.update({"paused": False}))
+        tbstate.write_last_advance()
+        sync_spinner(config)
+    except Exception as exc:
+        message = ("Queued %s, but setup did not finish" if args
+                   else "Could not resume %s") % label
+        raise SystemExit("%s: %s" % (message, exc))
+
+    surfaces = config["surfaces"]
+    display = ("HUD + spinner" if config.get("hud") and surfaces["statusline"]
+               else "line + spinner" if surfaces["statusline"]
+               else "spinner" if surfaces["spinner"] else "off")
+    pace = "250 WPM" if args else _pace_label(config)
+    extra = " (+%d more)" % (len(written) - 1) if len(written) > 1 else ""
+    print("Ready -- %s%s · %s · %s" % (label, extra, display, pace))
+    if surfaces["statusline"]:
+        print("Next: /thinking-book:n · Local controls: /thinking-book:book install-cli")
+    elif args:
+        print("HUD skipped: your status line is in use. /thinking-book:book pane on adds it.")
 
 
 # --------------------------------------------------------------------------- feeds
@@ -552,6 +634,8 @@ def cmd_pane(args):
 
     if action == "on":
         enable_statusline(auto=False)
+        if tbstate.load_config().get("hud"):
+            _set_hud(True)
         print("Status line reading surface enabled.")
     elif action == "off":
         _disable_statusline()
@@ -1203,7 +1287,8 @@ def cmd_restore(args):
 
 
 COMMANDS = {
-    "add": cmd_add, "load": cmd_load, "gutenberg": cmd_gutenberg, "libby": cmd_libby,
+    "add": cmd_add, "start": cmd_start, "load": cmd_load,
+    "gutenberg": cmd_gutenberg, "libby": cmd_libby,
     "clippings": cmd_clippings, "readwise": cmd_readwise, "read": cmd_read,
     "feed": cmd_feed, "queue": cmd_queue, "open": cmd_open, "status": cmd_status, "mode": cmd_mode,
     "pace": cmd_pace, "dwell": cmd_dwell, "pause": cmd_pause, "resume": cmd_resume, "pane": cmd_pane,

@@ -1,6 +1,6 @@
-# Storyline for Claude Code
+# Claude & Prejudice
 
-Turn the status line into a storyline. Read a book in the margins of Claude Code.
+Read a book in the margins of Claude Code—one status line at a time.
 
 This plugin replaces the little words Claude Code shows while it works — *Pondering…*,
 *Percolating…*, *Reticulating…* — with successive lines of whatever you're reading, and
@@ -13,14 +13,27 @@ puts the same line in your status line, where it can turn pages during a turn.
 ## Install
 
 ```
-/plugin marketplace add lukelandis3-sketch/claude-code-storyline
+/plugin marketplace add lukelandis3-sketch/claude-and-prejudice
 /plugin install thinking-book
 ```
 
-For guided setup inside Claude Code, use the native picker:
+Start with your own title, URL, or file in one command. HUD, spinner, and 250 WPM are
+configured automatically:
 
 ```
-/thinking-book:setup
+/thinking-book:setup moby dick
+/thinking-book:setup ~/Books/my-book.epub
+```
+
+Run `/thinking-book:setup` without an argument to see the exact syntax. Setup asks no
+questions, offers no preset books, and never retries a failed download.
+
+The first successful setup points to the optional one-time CLI installer. After that,
+starting another book can be entirely local:
+
+```sh
+tb start ~/Books/next.epub       # separate terminal: zero model tokens or conversation context
+!tb start "Pride and Prejudice" # inside Claude Code: no model turn; output may enter later context
 ```
 
 Or start directly. The plugin detects Gutenberg searches, URLs, EPUB/text files, Kindle
@@ -44,7 +57,7 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 |---|---|
 | `/thinking-book:n` | Turn the page — advance one line |
 | `/thinking-book:b` | Back one line |
-| `/thinking-book:setup` | Guided source, pace, mode, and display picker |
+| `/thinking-book:setup <book>` | Start your book with HUD, spinner, and 250 WPM |
 | `/book` | Compact reading dashboard and controls |
 | `/book status` | Dashboard plus display details and the whole queue |
 | `/book queue` | A numbered library with each book's bookmark |
@@ -79,10 +92,10 @@ The HUD is display-only. The `/book` dashboard prints working in-app page contro
 `tb` is installed they are `!tb n` and `!tb b`; otherwise it prints the plugin's absolute
 command, so page turning works immediately even when the install path contains spaces.
 
-## Turning pages without spending a turn
+## Local reading without spending a turn
 
 A slash command is a model turn: an assistant response, latency, tokens, and book-keeping
-noise threaded through your actual work. Two better ways, neither of which does that.
+noise threaded through your actual work. Install the local `tb` launcher once:
 
 ```sh
 /thinking-book:book install-cli      # symlinks bin/tb into ~/.local/bin
@@ -90,6 +103,8 @@ noise threaded through your actual work. Two better ways, neither of which does 
 
 | How | Cost |
 |---|---|
+| `tb start <book>` in another terminal | **Literally zero model tokens and no conversation context.** Import and setup run locally. |
+| `!tb start <book>` inside Claude Code | **No model turn.** Its short Bash transcript may accompany a later prompt. |
 | `!tb n` inside Claude Code | **No model turn.** A leading `!` is bash mode: it runs locally, and the input and output are recorded as `<bash-input>`/`<bash-stdout>` lines that are not treated as a user message. They do still sit in the conversation and go along with your next prompt. |
 | `tb n` in another terminal | **Nothing at all.** No turn, no context. |
 | `/thinking-book:n` | A full model turn. Works, but it is the expensive option. |
@@ -147,7 +162,7 @@ Adjust the path to wherever the plugin is installed.
   fixed interval.
 
 Existing installations keep their fixed-second pace until you run `/book pace 250` or
-choose timer mode again in guided setup.
+start a new book through setup.
 - **`turn`** — exactly one line per assistant turn, regardless of how long it took.
 - **`manual`** — the line holds until you type `/n`.
 

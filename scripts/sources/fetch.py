@@ -5,7 +5,7 @@ import io
 import urllib.error
 import urllib.request
 
-USER_AGENT = "thinking-book/0.6 (+https://github.com/lukelandis3-sketch/claude-code-storyline)"
+USER_AGENT = "thinking-book/0.7 (+https://github.com/lukelandis3-sketch/claude-and-prejudice)"
 TIMEOUT = 20
 MAX_BYTES = 12 * 1024 * 1024
 
