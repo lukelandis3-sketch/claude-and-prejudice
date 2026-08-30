@@ -5,6 +5,7 @@ import os
 import time
 import unittest
 
+import support
 from support import IsolatedStateCase
 
 
@@ -161,6 +162,29 @@ class HookTest(IsolatedStateCase):
     def test_unknown_command_is_an_error_not_a_crash(self):
         result = self.run_cli("nonsense")
         self.assertEqual(result.returncode, 2)
+
+    def test_unknown_command_names_the_version_and_path_it_ran_from(self):
+        # A directory-source install goes stale silently: `unknown command 'repair'` gave
+        # no hint that the fix was a git pull.
+        result = self.run_cli("repair-typo")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("thinking-book", result.stderr)
+        self.assertIn(support.REPO, result.stderr)
+        self.assertIn("git pull", result.stderr)
+        self.assertIn("repair", result.stderr)  # the real command is listed
+
+    def test_version_reports_the_manifest_version_and_root(self):
+        result = self.run_cli("version")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(os.path.join(support.REPO, ".claude-plugin", "plugin.json")) as fh:
+            expected = json.load(fh)["version"]
+        self.assertIn(expected, result.stdout)
+        self.assertIn(support.REPO, result.stdout)
+
+    def test_plugin_root_tolerates_a_trailing_slash(self):
+        result = self.run_cli("version", env={"CLAUDE_PLUGIN_ROOT": support.REPO + "/"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("//", result.stdout)
 
 
 if __name__ == "__main__":

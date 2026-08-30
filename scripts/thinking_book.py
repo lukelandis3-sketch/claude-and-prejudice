@@ -36,7 +36,19 @@ def _slug(prefix, value):
 
 
 def plugin_root():
-    return os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.dirname(HERE)
+    root = os.environ.get("CLAUDE_PLUGIN_ROOT") or os.path.dirname(HERE)
+    # ${CLAUDE_PLUGIN_ROOT} often carries a trailing slash; normalise so paths read cleanly.
+    return os.path.normpath(root)
+
+
+def version():
+    """Read the version from plugin.json -- the manifest is the single source of truth."""
+    manifest = os.path.join(plugin_root(), ".claude-plugin", "plugin.json")
+    try:
+        with open(manifest, encoding="utf-8") as fh:
+            return json.load(fh).get("version") or "unknown"
+    except (OSError, ValueError):
+        return "unknown"
 
 
 def statusline_command():
@@ -480,6 +492,12 @@ def cmd_line(_args):
         print(line)
 
 
+def cmd_version(_args):
+    """Which copy is actually running -- the answer when docs and behaviour disagree."""
+    print("thinking-book %s" % version())
+    print("running from %s" % plugin_root())
+
+
 # ---------------------------------------------------------------------------- hooks
 
 def _feeds_due():
@@ -568,7 +586,7 @@ COMMANDS = {
     "feed": cmd_feed, "queue": cmd_queue, "status": cmd_status, "mode": cmd_mode,
     "dwell": cmd_dwell, "pause": cmd_pause, "resume": cmd_resume, "pane": cmd_pane,
     "off": cmd_off, "next": cmd_next, "back": cmd_back, "line": cmd_line,
-    "repair": cmd_repair, "refresh": cmd_refresh,
+    "repair": cmd_repair, "refresh": cmd_refresh, "version": cmd_version,
     "sync": cmd_sync, "advance": cmd_advance, "restore": cmd_restore,
     "refresh-feeds": cmd_refresh_feeds,
 }
@@ -583,7 +601,13 @@ def main(argv):
     name, args = argv[0], argv[1:]
     handler = COMMANDS.get(name)
     if not handler:
-        print("unknown command %r" % name, file=sys.stderr)
+        # A directory-source install runs straight out of a git checkout, so it goes stale
+        # silently. Say which copy is running rather than only that the command is unknown.
+        print("unknown command %r -- thinking-book %s running from %s"
+              % (name, version(), plugin_root()), file=sys.stderr)
+        print("known commands: %s" % ", ".join(sorted(COMMANDS)), file=sys.stderr)
+        print("if you expected this command, that checkout may be behind: "
+              "git pull in the directory above, then restart Claude Code.", file=sys.stderr)
         return 2
 
     # Hooks swallow everything; interactive commands report their errors.

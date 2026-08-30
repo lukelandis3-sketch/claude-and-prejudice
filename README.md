@@ -43,6 +43,7 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 | `/book pane on\|off` | Attach or detach the status line surface |
 | `/book off` | Full stop — stock spinner verbs and your own status line back |
 | `/book repair` | Undo a self-wrapped status line (see below) |
+| `/book version` | Which version is running, and from which directory |
 | `/book refresh <secs\|off>` | Set `statusLine.refreshInterval` where your version supports it |
 
 ### A real `/n`
@@ -181,6 +182,15 @@ script wherever it was installed from, and `repair` to unwind machines already i
 Unlike most status line tools — [ccstatusline](https://github.com/sirmalloc/ccstatusline) and
 friends simply overwrite `statusLine` — thinking-book wraps whatever you already had and runs
 it alongside the book. `/book off` puts it back exactly as it was.
+
+## Keeping it up to date
+
+Installing from a directory source means the plugin runs straight out of your git checkout,
+so it does not update itself — `git pull` in that directory *is* the update, followed by a
+restart if `hooks/hooks.json` changed.
+
+If a command errors with `unknown command`, that is the signal: the error names the version
+and the directory it ran from, so compare it against `/book version` and this README.
 
 ## Development
 
