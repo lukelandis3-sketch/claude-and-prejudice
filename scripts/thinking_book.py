@@ -244,10 +244,9 @@ def _json_export_kind(path):
         return "readwise"
     highlights = payload.get("highlights")
     if isinstance(highlights, list):
-        if any(key in payload for key in ("title", "bookTitle", "name", "readingJourney")):
-            return "libby"
         if any(isinstance(row, dict) and any(
-                key in row for key in ("bookTitle", "Book Title", "author", "Author"))
+                key in row for key in (
+                    "title", "Title", "bookTitle", "Book Title", "author", "Author"))
                 for row in highlights):
             return "readwise"
         return "libby"

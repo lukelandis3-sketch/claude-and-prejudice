@@ -141,6 +141,17 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(json_result.returncode, 0, json_result.stderr)
         self.assertIn("Library Book", json_result.stdout)
 
+    def test_add_detects_readwise_json_without_an_author_field(self):
+        path = os.path.join(self.config_dir, "readwise.json")
+        with open(path, "w") as fh:
+            json.dump({"highlights": [
+                {"title": "One", "text": "First quote."},
+                {"title": "Two", "text": "Second quote."},
+            ]}, fh)
+        result = self.run_cli("add", path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("2 highlight book(s)", result.stdout)
+
     def test_display_modes_are_single_commands_and_off_restores_settings(self):
         original = {"type": "command", "command": "my-status"}
         with open(self.tbstate.settings_path(), "w") as fh:
