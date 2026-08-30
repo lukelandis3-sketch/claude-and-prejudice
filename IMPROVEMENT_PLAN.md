@@ -21,10 +21,18 @@ that could fit in the plugin.
 
 ### 1. Safe, automatic activation
 
-- On `SessionStart`, install or refresh the thinking-book status-line wrapper when the
-  saved configuration says the surface is on. Preserve and continue to run any existing
-  status line exactly as `pane on` does today. This removes the separate `pane on` step;
-  after plugin installation/restart, `/book gutenberg ...` or `/book load ...` is enough.
+- Distinguish the desired status-line surface from whether its command is actually
+  installed. Today the default config says it is on before `statusLine` exists, so timer
+  mode defers to a phantom surface and the first line can repeat forever.
+- Install the wrapper after the first successful interactive import when the surface is
+  desired, preserving any existing status line exactly as `pane on` does. This makes
+  `/book gutenberg ...` or `/book load ...` enough without changing settings merely
+  because an empty plugin session started.
+- Add `/book on` as an explicit recovery from `/book off`; it resumes, enables both
+  surfaces, installs the status line, and syncs the spinner. `/book off` currently has no
+  inverse and leaves the spinner disabled permanently through the CLI.
+- On `SessionStart`, reconcile the cached "installed" state with the live status-line
+  entry before deciding whether the Stop hook or status line owns timer advancement.
 - Sync the spinner immediately after a successful import, so interactive imports show
   the first line without waiting for another session or turn.
 - Keep `pane off` and `/book off` authoritative: automatic activation must not re-enable
@@ -66,14 +74,21 @@ that could fit in the plugin.
   the error, exit 0, and print nothing under `--quiet`.
 - Track the original presence/value of each touched key explicitly so an original JSON
   `null` value is distinguishable from a missing key during `/book off`.
+- Make settings updates compare the before/after dictionaries while holding the lock and
+  skip the atomic write when nothing changed. Manual, paused, and within-dwell turns must
+  not rewrite `settings.json` or trigger Claude Code's settings watcher.
+- When clearing, restore the backup only if the live value is still recognisably the
+  plugin's. If the user changed `spinnerVerbs` while thinking-book was active, preserve
+  the newer user value rather than overwriting it with an older backup.
 - Add end-to-end tests proving exact restoration of user `spinnerVerbs`, `statusLine`,
   unrelated nested values, and malformed-file byte preservation.
 
 ### 5. Hot-path redesign and measurement
 
 - Avoid reading stdin unless a wrapped status-line command actually needs it.
-- Replace the three `cat | tr` state reads with one shell-builtin-readable snapshot,
-  written atomically by Python and by the timer advance path.
+- Replace the three `cat | tr` state reads with direct POSIX `read` builtins and validate
+  each numeric value in the shell. This removes the pipelines without introducing a
+  second cursor representation or a new cross-writer consistency invariant.
 - Build fixed-size stream shards at queue-rebuild time. Look up at most one small shard
   instead of scanning from line 1 to line 25,000 on every invocation. Do not create one
   filesystem entry per fragment.
@@ -89,6 +104,11 @@ that could fit in the plugin.
 - Turn raw network and parser exception labels into short messages that name the failed
   source and suggest a next action. Reject over-limit downloads rather than silently
   importing truncated content, and cap decompressed gzip data as well as wire bytes.
+- Reject obvious PDF, ZIP/Office, Kindle, and other binary input passed to the plaintext
+  loader instead of turning replacement-character noise into a successful "book".
+- Reconstruct single-path arguments after slash-command blob splitting for `load`,
+  `libby`, `clippings`, and `readwise`, so ordinary paths containing spaces work without
+  requiring shell syntax knowledge.
 - Make bare `/book` output task-oriented help with a shortest-path first command.
 - Keep advanced controls discoverable but out of the first-run path. Update command
   hints and examples for `open`, clippings, and Readwise.
@@ -106,3 +126,48 @@ that could fit in the plugin.
   and an independent correctness hunt. Record adopted and rejected suggestions with
   reasons in the round report.
 - Do not claim a live Gutenberg fetch works if the environment cannot reach Gutendex.
+
+## Round 2: independent Opus ideas and decisions
+
+Opus independently read the plugin and proposed a v0.4 centered on making the default
+path work and removing unnecessary settings/hot-path work. It could not run commands in
+its headless sandbox, so its performance claims are treated as hypotheses to benchmark.
+
+Adopted:
+
+- Fix the phantom default status-line state that makes timer mode hold forever before
+  `pane on`.
+- Skip no-op `settings.json` writes under the existing lock.
+- Add `/book on`, the missing inverse of `/book off`.
+- Preserve the logical item/offset when queue rebuilds shift global line numbers.
+- Use shell builtins for numeric state reads and avoid stdin/output subshells when no
+  wrapped status line exists.
+- Repair slash-command paths containing spaces, reject binary-as-text imports, and avoid
+  overwriting a `spinnerVerbs` value the user changed while the plugin was active.
+
+Partially adopted or modified:
+
+- Opus recommended defaulting the status-line surface off and requiring `/book on`.
+  Instead, the first successful interactive import installs the desired default surface.
+  This is an explicit reading action, removes an onboarding step, and avoids modifying an
+  empty install merely on session start. `/book on` remains available and `pane off`/`off`
+  remain authoritative.
+- Opus recommended only removing process forks from the current `awk` lookup. That is
+  included, but the plan still shards the stream because a lookup at line 25,000 remains
+  a near-full scan and the user explicitly set a no-full-file-scan hot-path constraint.
+- Opus suggested a Readwise API integration using `READWISE_TOKEN`. The plan keeps local
+  CSV/JSON exports instead: no secret storage, pagination, network dependency, or new
+  remote failure mode is needed to deliver the requested highlights importer.
+
+Rejected for this version:
+
+- Natural variable pacing based on fragment length: it makes dwell semantics less
+  predictable and belongs behind a later opt-in experiment, not a hardening release.
+- Status-line percentage/context: useful in the reader pane, but it spends scarce status
+  space and changes the minimal reading surface without addressing a core problem.
+- Automatic pruning of feed articles, `/book tidy`, Gutenberg search UI, and a prefix
+  command: reasonable follow-ups, but lower impact than integrity, bookmarks, importers,
+  and the hot path.
+- A background wall-clock daemon, JSON parsing in the shell, multi-element spinner verbs,
+  SQLite, and DRM-adjacent Kindle scraping/decryption: these conflict with the plugin's
+  simplicity, deterministic order, or explicit hard constraints.
