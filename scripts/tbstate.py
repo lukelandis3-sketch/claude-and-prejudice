@@ -13,6 +13,7 @@ import errno
 import fcntl
 import json
 import os
+import re
 import tempfile
 import time
 import shutil
@@ -143,6 +144,8 @@ def write_json(target, data):
 
 def load_config():
     config = read_json(path("config.json"), DEFAULT_CONFIG)
+    if not isinstance(config, dict):
+        config = {}
     merged = json.loads(json.dumps(DEFAULT_CONFIG))
     merged.update({k: v for k, v in config.items() if k in DEFAULT_CONFIG})
     if merged.get("mode") not in VALID_MODES:
@@ -227,7 +230,8 @@ def stream_path():
 
 
 def stream_generation():
-    return _read(path("stream.gen"), "").strip()
+    generation = _read(path("stream.gen"), "").strip()
+    return generation if re.fullmatch(r"[0-9a-f-]+", generation) else ""
 
 
 def stream_generation_dir(generation=None):
@@ -315,7 +319,7 @@ def rebuild_stream():
         if not lines:
             continue
         meta = item_meta(item_id)
-        title = (meta.get("title") or item_id).replace("\t", " ")
+        title = " ".join(str(meta.get("title") or item_id).split())
         kind = meta.get("kind", "text")
         index_rows.append("%d\t%s\t%s\t%s" % (line_no, item_id, kind, title))
         chunks.extend(lines)

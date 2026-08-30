@@ -224,7 +224,7 @@ def _feeds_file():
 
 def load_feeds():
     data = tbstate.read_json(_feeds_file(), {"feeds": []})
-    return data if isinstance(data.get("feeds"), list) else {"feeds": []}
+    return data if isinstance(data, dict) and isinstance(data.get("feeds"), list) else {"feeds": []}
 
 
 def save_feeds(data):
@@ -309,7 +309,7 @@ def refresh_feeds(force=False):
                 _install(_slug("article", item["link"]), article_meta, text, announce=False)
                 added += 1
             except Exception:
-                pass
+                continue
             seen.append(item["link"])
         entry["seen"] = seen[-500:]
     save_feeds(data)

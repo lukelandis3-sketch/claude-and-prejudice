@@ -67,7 +67,11 @@ fi
 read_int() {
     destination=$1
     value=''
-    IFS= read -r value 2>/dev/null < "$2" || value=''
+    if IFS= read -r value 2>/dev/null < "$2"; then
+        :
+    elif [ -z "$value" ]; then
+        value=''
+    fi
     case "$value" in
         ''|*[!0-9]*) value=$3 ;;
     esac
