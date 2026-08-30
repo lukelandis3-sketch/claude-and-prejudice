@@ -104,6 +104,20 @@ class RoundTripTest(IsolatedStateCase):
         self.assertIn("A. Fixture", status.stdout)
         self.assertIn("Position: line 1 of", status.stdout)
 
+    def test_status_reports_progress_in_the_current_book_not_the_whole_library(self):
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1", "b2", "b3"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        self.tbstate.write_pos(4)
+
+        status = self.run_cli("status")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("Reading:  Beta", status.stdout)
+        self.assertIn("Position: line 2 of 3  (66.7%)", status.stdout)
+        self.assertIn("Library:  book 2 of 2", status.stdout)
+        self.assertNotIn("line 4 of 5", status.stdout)
+
     def test_pane_on_wraps_an_existing_status_line_and_off_restores_it(self):
         original = {"type": "command", "command": "my-own-prompt", "padding": 1}
         with open(self.tbstate.settings_path(), "w") as fh:
@@ -252,6 +266,29 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(len(rows), 2)
         self.assertLess(rows[0][0], rows[1][0])
 
+    def test_queue_is_numbered_and_marks_the_current_book(self):
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "Beta", "kind": "article"}, ["b1", "b2"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        self.tbstate.write_pos(4)
+
+        result = self.run_cli("queue")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("1.    Alpha [1/2] (book)", result.stdout)
+        self.assertIn("2. -> Beta [2/2] (article)", result.stdout)
+
+    def test_open_accepts_the_number_shown_by_queue(self):
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1"])
+        self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+
+        result = self.run_cli("open", "2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Opened Beta", result.stdout)
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "b1")
+
     def test_reimporting_the_same_book_does_not_duplicate_it(self):
         self.run_cli("load", self.book)
         first_total = self.tbstate.stream_count()
@@ -278,6 +315,24 @@ class RoundTripTest(IsolatedStateCase):
         self.tbstate.write_pos(2)
         self.run_cli("queue", "rm", "b")
         self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "c1")
+
+    def test_queue_remove_accepts_a_number_or_title_and_rejects_no_match(self):
+        for item, title in (("a", "Alpha One"), ("b", "Beta Two"), ("c", "Gamma Three")):
+            self.tbstate.save_item(item, {"title": title, "kind": "book"}, [item + "1"])
+        self.tbstate.save_queue({"items": ["a", "b", "c"]})
+        self.tbstate.rebuild_stream()
+
+        by_number = self.run_cli("queue", "rm", "2")
+        self.assertEqual(by_number.returncode, 0, by_number.stderr)
+        self.assertIn("Removed Beta Two", by_number.stdout)
+        by_title = self.run_cli("queue", "rm", "Gamma", "Three")
+        self.assertEqual(by_title.returncode, 0, by_title.stderr)
+        self.assertEqual(self.tbstate.load_queue()["items"], ["a"])
+
+        missing = self.run_cli("queue", "rm", "Nobody")
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn("no queued item matches", missing.stderr)
+        self.assertEqual(self.tbstate.load_queue()["items"], ["a"])
 
     def test_reimport_preserves_position_in_a_later_item(self):
         first = os.path.join(self.config_dir, "first.txt")

@@ -36,9 +36,10 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 |---|---|
 | `/thinking-book:n` | Turn the page — advance one line |
 | `/thinking-book:b` | Back one line |
-| `/book status` | Title, author, position, percent read, current line |
-| `/book queue` | What's queued, and what you're in the middle of |
-| `/book open <id-or-title>` | Switch books; each one keeps its own bookmark |
+| `/book status` | Title, author, progress in this book, current line |
+| `/book queue` | A numbered library with each book's bookmark |
+| `/book open <number-or-title>` | Switch books; each one keeps its own bookmark |
+| `/book queue rm <number-or-title>` | Remove a book and continue at the next one |
 | `/book mode timer\|turn\|manual` | How pages turn (below) |
 | `/book dwell <seconds>` | Reading pace for timer mode (default 8) |
 | `/book pause` / `/book resume` | Freeze on a line, or carry on |

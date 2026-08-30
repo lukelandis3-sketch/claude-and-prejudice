@@ -535,6 +535,52 @@ def cmd_refresh(args):
 
 # -------------------------------------------------------------------------- reading
 
+def _queue_entries(rows=None):
+    """Human-facing queue state, derived once for status, listing, and selection."""
+    rows = tbstate.load_index() if rows is None else rows
+    total = tbstate.stream_count()
+    current = tbstate.locate_position(tbstate.read_pos(), rows=rows, total=total)
+    bookmarks = tbstate.load_bookmarks()
+    entries = []
+    for number, row in enumerate(rows, 1):
+        _start, item_id, kind, title = row
+        bounds = tbstate.item_bounds(item_id, rows=rows, total=total)
+        length = bounds[1] - bounds[0] + 1
+        active = bool(current and current[0] == item_id)
+        offset = current[1] if active else bookmarks.get(item_id, 1)
+        try:
+            offset = int(offset)
+        except (TypeError, ValueError):
+            offset = 1
+        offset = max(1, min(offset, length))
+        entries.append({
+            "number": number, "id": item_id, "kind": kind, "title": title,
+            "offset": offset, "length": length, "active": active,
+        })
+    return entries
+
+
+def _resolve_queue_item(query, rows=None):
+    """Resolve a stable id, exact/partial title, or the number shown by `/book queue`."""
+    query = query.strip()
+    entries = _queue_entries(rows)
+    folded = query.casefold()
+    matches = [entry for entry in entries
+               if entry["id"] == query or entry["title"].casefold() == folded]
+    if not matches and query.isdigit():
+        matches = [entry for entry in entries if entry["number"] == int(query)]
+    if not matches:
+        matches = [entry for entry in entries if folded in entry["title"].casefold()]
+    if not matches:
+        raise SystemExit("no queued item matches %r; run /book queue for numbers and titles."
+                         % query)
+    if len(matches) > 1:
+        choices = ", ".join("%d: %s (%s)" % (
+                            entry["number"], entry["title"], entry["id"])
+                            for entry in matches)
+        raise SystemExit("%r is ambiguous: %s" % (query, choices))
+    return matches[0]
+
 def cmd_next(args):
     steps = int(args[0]) if args and args[0].lstrip("-").isdigit() else 1
     advance_by(steps)
@@ -558,13 +604,22 @@ def cmd_status(_args):
         print("Nothing queued. Start with /book gutenberg <title> or /book load <file.epub>.")
         return
 
+    rows = tbstate.load_index()
     current = tbstate.item_at(position)
-    percent = (position / total) * 100
+    logical = tbstate.locate_position(position, rows=rows, total=total)
+    bounds = tbstate.item_bounds(current[1], rows=rows, total=total) if current else None
+    offset = logical[1] if logical else position
+    length = bounds[1] - bounds[0] + 1 if bounds else total
+    percent = (offset / length) * 100
     print("Reading:  %s" % (current[3] if current else "(unknown)"))
     meta = tbstate.item_meta(current[1]) if current else {}
     if meta.get("author"):
         print("Author:   %s" % meta["author"])
-    print("Position: line %d of %d  (%.1f%%)" % (position, total, percent))
+    print("Position: line %d of %d  (%.1f%%)" % (offset, length, percent))
+    if len(rows) > 1 and current:
+        book_number = next((number for number, row in enumerate(rows, 1)
+                            if row[1] == current[1]), 1)
+        print("Library:  book %d of %d" % (book_number, len(rows)))
     print("Mode:     %s%s (dwell %ss)" % (config["mode"], " [paused]" if config["paused"] else "", config["dwell_seconds"]))
     print("Surfaces: statusline=%s spinner=%s" % (
         "on" if config["surfaces"]["statusline"] else "off",
@@ -572,63 +627,64 @@ def cmd_status(_args):
     ))
     print("Current:  %s" % (current_line() or "(blank)"))
 
-    queue = tbstate.load_queue()
-    if len(queue["items"]) > 1:
+    if len(rows) > 1:
         print("\nQueue:")
-        for start, item_id, kind, title in tbstate.load_index():
-            marker = "->" if current and item_id == current[1] else "  "
-            print("  %s %-9s %s" % (marker, kind, title))
+        for entry in _queue_entries(rows):
+            marker = "->" if entry["active"] else "  "
+            print("  %d. %s %s" % (entry["number"], marker, entry["title"]))
 
 
 def cmd_queue(args):
     action = args[0] if args else "list"
     if action == "list":
-        rows = tbstate.load_index()
-        bookmarks = tbstate.load_bookmarks()
-        current = tbstate.locate_position(tbstate.read_pos())
-        if not rows:
+        entries = _queue_entries()
+        if not entries:
             print("Queue is empty.")
-        for start, item_id, kind, title in rows:
-            bounds = tbstate.item_bounds(item_id, rows=rows)
-            length = bounds[1] - bounds[0] + 1
-            saved = current[1] if current and current[0] == item_id else bookmarks.get(item_id, 1)
-            print("%-24s %-9s [%d/%d] %s" % (item_id, kind, saved, length, title))
+        for entry in entries:
+            marker = "->" if entry["active"] else "  "
+            print("%d. %s %s [%d/%d] (%s)" % (
+                entry["number"], marker, entry["title"], entry["offset"],
+                entry["length"], entry["kind"]))
         return
 
+    removed_title = None
+    removed_count = 0
     with tbstate.locked():
         logical = tbstate.capture_position()
         queue = tbstate.load_queue()
         old_items = list(queue["items"])
         if action == "clear":
+            removed_count = len(queue["items"])
             queue["items"] = []
         elif action == "rm" and len(args) > 1:
-            queue["items"] = [i for i in queue["items"] if i != args[1]]
+            selected = _resolve_queue_item(" ".join(args[1:]))
+            removed_title = selected["title"]
+            queue["items"] = [i for i in queue["items"] if i != selected["id"]]
         else:
-            raise SystemExit("usage: /book queue [list|rm <id>|clear]")
+            raise SystemExit("usage: /book queue [list|rm <number-or-title>|clear]")
         tbstate.save_queue(queue)
         tbstate.rebuild_stream()
         tbstate.restore_position(logical, old_items=old_items)
     sync_spinner()
-    print("Queue updated.")
+    if removed_title:
+        now = tbstate.item_at(tbstate.read_pos())
+        suffix = " Now reading %s." % now[3] if now else " Queue is empty."
+        print("Removed %s.%s" % (removed_title, suffix))
+    else:
+        print("Removed %d queued item%s." %
+              (removed_count, "" if removed_count == 1 else "s"))
 
 
 def cmd_open(args):
     if not args:
-        raise SystemExit("usage: /book open <id-or-title>")
+        raise SystemExit("usage: /book open <number-or-title>")
     query = " ".join(args).strip()
     rows = tbstate.load_index()
-    exact = [row for row in rows if row[1] == query]
-    exact_title = [row for row in rows if row[3].casefold() == query.casefold()]
-    matches = exact or exact_title or [row for row in rows if query.casefold() in row[3].casefold()]
-    if not matches:
-        raise SystemExit("no queued item matches %r; run /book queue for ids." % query)
-    if len(matches) > 1:
-        choices = ", ".join("%s (%s)" % (row[3], row[1]) for row in matches)
-        raise SystemExit("%r is ambiguous: %s" % (query, choices))
+    selected = _resolve_queue_item(query, rows=rows)
 
     with tbstate.locked():
         tbstate.capture_position()
-        item_id, title = matches[0][1], matches[0][3]
+        item_id, title = selected["id"], selected["title"]
         offset = tbstate.load_bookmarks().get(item_id, 1)
         position = tbstate.resolve_position(item_id, offset)
         tbstate.write_pos(position or 1)
@@ -757,7 +813,8 @@ def cmd_version(_args):
 
 def print_help():
     print("Read something now: /book gutenberg <title> or /book load <file.epub>")
-    print("Then: /book status · /book open <book> · /book pause · /book off")
+    print("Then: /book status · /book queue · /book open <number-or-title> · /book pause")
+    print("Library: /book queue rm <number-or-title> · /book queue clear")
     print("Sources: read <url> · clippings <file> · readwise <export> · libby <export> · feed")
     print("All commands: %s" % ", ".join(sorted(COMMANDS)))
 
