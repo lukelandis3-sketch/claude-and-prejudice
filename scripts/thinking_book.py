@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import sys
 import time
 
@@ -541,7 +542,10 @@ def cmd_hud(args):
         generation_dir = tbstate.stream_generation_dir()
         if not generation_dir or not os.path.isfile(os.path.join(generation_dir, "0.hud")):
             with tbstate.locked():
-                tbstate.rebuild_stream()
+                logical = tbstate.capture_position()
+                old_items = list(tbstate.load_queue()["items"])
+                tbstate.rebuild_stream(include_hud=True)
+                tbstate.restore_position(logical, old_items=old_items)
     config = tbstate.update_config(lambda live: live.update({"hud": enabled}))
     if enabled:
         message = "Graphical reading HUD enabled. It will appear above the book line."
@@ -614,18 +618,35 @@ def cmd_dashboard(_args):
     config = tbstate.load_config()
     entries = _queue_entries()
     active = next((entry for entry in entries if entry["active"]), None)
+    queue_ids = tbstate.load_queue()["items"]
+    indexed_ids = {entry["id"] for entry in entries}
+    unavailable = [item_id for item_id in queue_ids if item_id not in indexed_ids]
     print("thinking-book %s" % version())
     if not active:
+        if unavailable:
+            print("\n%d queued item%s unavailable; run /book queue to inspect or remove %s."
+                  % (len(unavailable), " is" if len(unavailable) == 1 else "s are",
+                     "it" if len(unavailable) == 1 else "them"))
+            print("Help: /book help · Guided setup: /thinking-book:setup")
+            return
         print("\nNo book is queued.")
         print("Start: /book gutenberg <title> · /book load <file.epub>")
-        print("Guided setup: /thinking-book:setup")
+        print("Guided setup: /thinking-book:setup · Help: /book help")
         return
 
     meta = tbstate.item_meta(active["id"])
     author = meta.get("author") if isinstance(meta, dict) else None
     heading = "📖 %s%s" % (active["title"], " — %s" % author if author else "")
     percent = (active["offset"] * 100) // max(1, active["length"])
-    state = "paused" if config["paused"] else "reading"
+    surfaces = config["surfaces"]
+    if not (surfaces["statusline"] or surfaces["spinner"]):
+        state = "off — /book on"
+    elif config["paused"]:
+        state = "paused"
+    elif not surfaces["statusline"]:
+        state = "reading (spinner only)"
+    else:
+        state = "reading"
     pace = "timer %ss" % config["dwell_seconds"] if config["mode"] == "timer" else config["mode"]
     print("\n%s" % heading)
     print("%s %d/%d (%d%%) · %s · %s" % (
@@ -634,9 +655,21 @@ def cmd_dashboard(_args):
     if len(entries) > 1:
         print("Library: book %d of %d" % (active["number"], len(entries)))
     print("Current: %s" % (current_line() or "(blank)"))
-    print("\nNext: !tb n · Back: !tb b · Pause: /book pause")
+    if shutil.which("tb"):
+        controls = "Next: !tb n · Back: !tb b"
+    else:
+        controls = ("Next: /thinking-book:n · Back: /thinking-book:b · "
+                    "Faster: /book install-cli")
+    if not (surfaces["statusline"] or surfaces["spinner"]):
+        controls += " · Enable: /book on"
+    elif config["paused"]:
+        controls += " · Resume: /book resume"
+    else:
+        controls += " · Pause: /book pause"
+    print("\n%s" % controls)
     print("Switch: /book queue · Display: /book hud %s · Setup: /thinking-book:setup" %
           ("off" if config.get("hud") else "on"))
+    print("All commands: /book help")
 
 
 def cmd_next(args):

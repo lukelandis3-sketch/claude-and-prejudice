@@ -5,6 +5,19 @@ from support import IsolatedStateCase
 
 
 class StreamTest(IsolatedStateCase):
+    def test_compact_default_does_not_write_unused_hud_shards(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        self.assertFalse(os.path.exists(os.path.join(
+            self.tbstate.stream_generation_dir(), "0.hud")))
+
+    def test_hud_title_is_single_line_bounded_and_control_free(self):
+        hostile = "\x1b[31mBad\tTitle\u2028" + "x" * 200
+        line = self.tbstate.hud_line("fallback", hostile, 1, 2)
+        self.assertNotIn("\x1b", line)
+        self.assertNotIn("\n", line)
+        title = line.split(" · ", 1)[0].removeprefix("📖 ")
+        self.assertLessEqual(len(title), 38)
+
     def test_load_queue_filters_invalid_and_duplicate_item_ids(self):
         self.tbstate.write_json(
             self.tbstate.path("queue.json"),

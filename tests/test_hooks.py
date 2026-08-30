@@ -215,8 +215,10 @@ class HookTest(IsolatedStateCase):
         path = os.path.join(support.REPO, "commands", "setup.md")
         with open(path) as fh:
             source = fh.read()
-        self.assertIn("AskUserQuestion", source)
+        self.assertIn("allowed-tools: AskUserQuestion, Bash(python3:*)", source)
         self.assertIn("thinking_book.py", source)
+        self.assertIn("version output above", source)
+        self.assertIn("spinner only", source)
         self.assertNotIn("settings.json", source)
 
     def test_help_command_prints_task_oriented_help(self):

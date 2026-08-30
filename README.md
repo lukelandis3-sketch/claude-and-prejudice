@@ -68,8 +68,9 @@ Call me Ishmael.
 ```
 
 It is optional and off by default. Normal mode retains the original one-line display and
-one bounded lookup. HUD mode performs one additional lookup in a matching 256-line metadata
-shard; it never starts Python or scans the book. Turn it off at any time with `/book hud off`.
+one bounded lookup, and does not generate HUD shards. Enabling the HUD builds matching
+256-line metadata shards once; each display then performs one additional bounded lookup. It
+never starts Python or scans the book. Turn it off at any time with `/book hud off`.
 
 The HUD is display-only. Claude Code does not expose plugin buttons or arbitrary-command
 keybindings, so the in-app, no-model-turn controls remain `!tb n` and `!tb b`.
@@ -196,8 +197,8 @@ is the hot path: no Python, no JSON parsing, no full-file scans — Python pre-c
 immutable 256-line shards and publishes them through one atomic generation pointer. The
 shell reads one prose shard and, only when the HUD is enabled, one matching metadata shard.
 Across 100 invocations on the development Mac at line 25,000 of 25,000, compact manual mode
-measured 9.70 ms median (10.39 ms p95); the graphical HUD measured 12.46 ms median
-(14.01 ms p95), against a 5 s timeout.
+measured 9.04 ms median (10.11 ms p95); the graphical HUD measured 11.64 ms median
+(12.72 ms p95), against a 5 s timeout.
 
 State lives in `~/.claude/thinking-book/`. JSON files are the human-readable record;
 flat one-value files (`pos`, `last`, `count`, `hot.env`) and immutable stream shards keep

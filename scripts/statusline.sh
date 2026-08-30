@@ -123,9 +123,9 @@ HUD=''
 if [ "$TB_STATUSLINE" = "1" ] && [ -n "$STREAM_DIR" ] && [ "$POS" -le "$COUNT" ]; then
     SHARD=$(((POS - 1) / 256))
     ROW=$(((POS - 1) % 256 + 1))
-    LINE=$(sed -n "${ROW}p" "$STREAM_DIR/$SHARD.txt" 2>/dev/null) || LINE=''
+    LINE=$(sed -n "${ROW}{p;q;}" "$STREAM_DIR/$SHARD.txt" 2>/dev/null) || LINE=''
     if [ "$TB_HUD" = "1" ]; then
-        HUD=$(sed -n "${ROW}p" "$STREAM_DIR/$SHARD.hud" 2>/dev/null) || HUD=''
+        HUD=$(sed -n "${ROW}{p;q;}" "$STREAM_DIR/$SHARD.hud" 2>/dev/null) || HUD=''
         if [ -n "$HUD" ]; then
             if [ "$TB_MODE" = "timer" ]; then
                 HUD="$HUD · timer ${TB_DWELL}s"

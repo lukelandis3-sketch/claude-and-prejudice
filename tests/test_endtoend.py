@@ -106,12 +106,28 @@ class RoundTripTest(IsolatedStateCase):
 
     def test_bare_dashboard_shows_current_book_progress_and_controls(self):
         self.run_cli("load", self.book)
-        dashboard = self.run_cli("")
+        dashboard = self.run_cli("", env={"PATH": ""})
         self.assertEqual(dashboard.returncode, 0, dashboard.stderr)
         self.assertIn("📖 The Test Voyage", dashboard.stdout)
         self.assertIn("1/", dashboard.stdout)
-        self.assertIn("!tb n", dashboard.stdout)
+        self.assertIn("/thinking-book:n", dashboard.stdout)
+        self.assertIn("install-cli", dashboard.stdout)
         self.assertIn("/thinking-book:setup", dashboard.stdout)
+
+    def test_dashboard_off_state_points_to_on_instead_of_pause(self):
+        self.run_cli("load", self.book)
+        self.run_cli("off")
+        dashboard = self.run_cli("")
+        self.assertIn("off — /book on", dashboard.stdout)
+        self.assertNotIn("Pause: /book pause", dashboard.stdout)
+
+    def test_dashboard_reports_damaged_queue_instead_of_calling_it_empty(self):
+        self.tbstate.save_queue({"items": ["missing-fragments"]})
+        self.tbstate.rebuild_stream()
+        dashboard = self.run_cli("")
+        self.assertIn("unavailable", dashboard.stdout)
+        self.assertIn("/book queue", dashboard.stdout)
+        self.assertNotIn("No book is queued", dashboard.stdout)
 
     def test_hud_command_enables_and_disables_the_graphical_status(self):
         self.run_cli("load", self.book)
@@ -125,6 +141,18 @@ class RoundTripTest(IsolatedStateCase):
         disabled = self.run_cli("hud", "off")
         self.assertEqual(disabled.returncode, 0, disabled.stderr)
         self.assertFalse(self.tbstate.load_config()["hud"])
+
+    def test_enabling_hud_preserves_logical_bookmark_when_a_prior_item_is_damaged(self):
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1", "b2"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        self.tbstate.write_pos(4)
+        os.unlink(self.tbstate.item_fragments_path("a"))
+
+        enabled = self.run_cli("hud", "on")
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "b2")
 
     def test_status_reports_progress_in_the_current_book_not_the_whole_library(self):
         self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1", "a2"])

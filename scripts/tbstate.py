@@ -336,14 +336,16 @@ def hud_line(item_id, title, offset, total):
         _hud_title(item_id, title), progress_bar(offset, total), offset, total, percent)
 
 
-def rebuild_stream():
+def rebuild_stream(include_hud=None):
     """Flatten every queued item into one stream file plus an index of item offsets.
 
     Doing this at import time is what keeps statusline.sh to a single `awk` lookup.
     """
     ensure_home()
+    include_hud = load_config()["hud"] if include_hud is None else bool(include_hud)
     queue = load_queue()
-    chunks, hud_rows, index_rows, line_no = [], [], [], 1
+    chunks, index_rows, line_no = [], [], 1
+    hud_rows = [] if include_hud else None
     for item_id in queue["items"]:
         raw = _read(item_fragments_path(item_id), "")
         lines = [ln for ln in raw.split("\n") if ln.strip()]
@@ -355,8 +357,9 @@ def rebuild_stream():
         kind = meta.get("kind", "text")
         index_rows.append("%d\t%s\t%s\t%s" % (line_no, item_id, kind, title))
         chunks.extend(lines)
-        hud_rows.extend(hud_line(item_id, title, offset, len(lines))
-                        for offset in range(1, len(lines) + 1))
+        if hud_rows is not None:
+            hud_rows.extend(hud_line(item_id, title, offset, len(lines))
+                            for offset in range(1, len(lines) + 1))
         line_no += len(lines)
     atomic_write(stream_path(), ("\n".join(chunks) + "\n") if chunks else "")
     atomic_write(path("stream.idx"), ("\n".join(index_rows) + "\n") if index_rows else "")
@@ -379,10 +382,11 @@ def _publish_stream_generation(lines, hud_rows):
             os.path.join(target, "%d.txt" % (start // STREAM_SHARD_LINES)),
             "\n".join(shard) + "\n",
         )
-        atomic_write(
-            os.path.join(target, "%d.hud" % (start // STREAM_SHARD_LINES)),
-            "\n".join(hud_rows[start:start + STREAM_SHARD_LINES]) + "\n",
-        )
+        if hud_rows is not None:
+            atomic_write(
+                os.path.join(target, "%d.hud" % (start // STREAM_SHARD_LINES)),
+                "\n".join(hud_rows[start:start + STREAM_SHARD_LINES]) + "\n",
+            )
     atomic_write(os.path.join(target, "count"), "%d\n" % len(lines))
     atomic_write(path("stream.gen"), generation + "\n")
 

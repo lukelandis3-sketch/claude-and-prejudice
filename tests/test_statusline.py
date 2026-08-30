@@ -12,6 +12,12 @@ from support import STATUSLINE, IsolatedStateCase
 
 
 class StatusLineTest(IsolatedStateCase):
+    def _enable_hud(self):
+        config = self.tbstate.load_config()
+        config["hud"] = True
+        self.tbstate.save_config(config)
+        self.tbstate.rebuild_stream()
+
     def test_prints_the_current_line(self):
         self.seed_stream(["Call me Ishmael.", "Some years ago."])
         result = self.run_statusline()
@@ -94,9 +100,7 @@ class StatusLineTest(IsolatedStateCase):
 
     def test_optional_hud_adds_precomputed_book_progress_above_the_line(self):
         self.seed_stream(["one", "two"], mode="manual")
-        config = self.tbstate.load_config()
-        config["hud"] = True
-        self.tbstate.save_config(config)
+        self._enable_hud()
 
         lines = self.run_statusline().stdout.strip().split("\n")
         self.assertEqual(lines, [
@@ -106,27 +110,21 @@ class StatusLineTest(IsolatedStateCase):
 
     def test_hud_marks_paused_timer_mode(self):
         self.seed_stream(["one"], mode="timer", dwell=12, paused=True)
-        config = self.tbstate.load_config()
-        config["hud"] = True
-        self.tbstate.save_config(config)
+        self._enable_hud()
         first = self.run_statusline().stdout.splitlines()[0]
         self.assertIn("timer 12s", first)
         self.assertIn("paused", first)
 
     def test_hud_missing_from_an_old_generation_falls_back_to_the_book_line(self):
         self.seed_stream(["one"], mode="manual")
-        config = self.tbstate.load_config()
-        config["hud"] = True
-        self.tbstate.save_config(config)
+        self._enable_hud()
         os.unlink(os.path.join(self.tbstate.stream_generation_dir(), "0.hud"))
         self.assertEqual(self.run_statusline().stdout.strip(), "one")
 
     def test_hud_metadata_stays_aligned_across_shard_boundaries(self):
         lines = ["line-%d" % n for n in range(1, 259)]
         self.seed_stream(lines, mode="manual")
-        config = self.tbstate.load_config()
-        config["hud"] = True
-        self.tbstate.save_config(config)
+        self._enable_hud()
         for position in (256, 257):
             with self.subTest(position=position):
                 self.tbstate.write_pos(position)
@@ -147,9 +145,7 @@ class StatusLineTest(IsolatedStateCase):
 
     def test_hud_follows_a_wrapped_status_line_without_replacing_it(self):
         self.seed_stream(["one"], mode="manual")
-        config = self.tbstate.load_config()
-        config["hud"] = True
-        self.tbstate.save_config(config)
+        self._enable_hud()
         self._wrap("echo 'my own status line'")
         lines = self.run_statusline().stdout.strip().split("\n")
         self.assertEqual(lines[0], "my own status line")
