@@ -535,6 +535,11 @@ def cmd_refresh(args):
 
 # -------------------------------------------------------------------------- reading
 
+def _display_title(item_id, title):
+    """Never let missing, whitespace-only, or legacy index titles leak into the UI."""
+    return " ".join(str(title or "").split()) or item_id
+
+
 def _queue_entries(rows=None):
     """Human-facing queue state, derived once for status, listing, and selection."""
     rows = tbstate.load_index() if rows is None else rows
@@ -555,7 +560,8 @@ def _queue_entries(rows=None):
             offset = 1
         offset = max(1, min(offset, length))
         entries.append({
-            "number": number, "id": item_id, "kind": kind, "title": title,
+            "number": number, "id": item_id, "kind": kind,
+            "title": _display_title(item_id, title),
             "offset": offset, "length": length, "active": active,
         })
     return entries
@@ -566,12 +572,11 @@ def _resolve_queue_item(query, rows=None):
     query = query.strip()
     entries = _queue_entries(rows)
     folded = query.casefold()
-    matches = []
-    if query.isdecimal():
+    matches = [entry for entry in entries if entry["id"] == query]
+    if not matches and query.isdecimal():
         matches = [entry for entry in entries if entry["number"] == int(query)]
     if not matches:
-        matches = [entry for entry in entries
-                   if entry["id"] == query or entry["title"].casefold() == folded]
+        matches = [entry for entry in entries if entry["title"].casefold() == folded]
     if not matches:
         matches = [entry for entry in entries if folded in entry["title"].casefold()]
     if not matches:
@@ -639,37 +644,58 @@ def cmd_queue(args):
     action = args[0] if args else "list"
     if action == "list":
         entries = _queue_entries()
-        if not entries:
+        queue_ids = tbstate.load_queue()["items"]
+        indexed_ids = {entry["id"] for entry in entries}
+        unavailable = [item_id for item_id in queue_ids if item_id not in indexed_ids]
+        if not entries and not unavailable:
             print("Queue is empty.")
         for entry in entries:
             marker = "->" if entry["active"] else "  "
             print("%d. %s %s [%d/%d] (%s)" % (
                 entry["number"], marker, entry["title"], entry["offset"],
                 entry["length"], entry["kind"]))
+        for item_id in unavailable:
+            print("! %s (unavailable; remove with /book queue rm %s)" % (item_id, item_id))
         return
+
+    if action not in ("clear", "rm") or (action == "rm" and len(args) < 2):
+        raise SystemExit("usage: /book queue [list|rm <number-or-title>|clear]")
 
     removed_title = None
     removed_count = 0
+    removed_active = False
     with tbstate.locked():
-        logical = tbstate.capture_position()
         queue = tbstate.load_queue()
         old_items = list(queue["items"])
         if action == "clear":
             removed_count = len(queue["items"])
-            queue["items"] = []
-        elif action == "rm" and len(args) > 1:
-            selected = _resolve_queue_item(" ".join(args[1:]))
-            removed_title = selected["title"]
-            queue["items"] = [i for i in queue["items"] if i != selected["id"]]
+            selected = None
         else:
-            raise SystemExit("usage: /book queue [list|rm <number-or-title>|clear]")
+            query = " ".join(args[1:]).strip()
+            if query in queue["items"]:
+                meta = tbstate.item_meta(query)
+                meta = meta if isinstance(meta, dict) else {}
+                selected = {"id": query, "title": _display_title(query, meta.get("title"))}
+            else:
+                selected = _resolve_queue_item(query)
+            removed_title = selected["title"]
+        logical = tbstate.capture_position()
+        if action == "clear":
+            queue["items"] = []
+        else:
+            removed_active = bool(logical and logical[0] == selected["id"])
+            queue["items"] = [i for i in queue["items"] if i != selected["id"]]
         tbstate.save_queue(queue)
         tbstate.rebuild_stream()
         tbstate.restore_position(logical, old_items=old_items)
     sync_spinner()
     if action == "rm":
         now = tbstate.item_at(tbstate.read_pos())
-        suffix = " Now reading %s." % now[3] if now else " Queue is empty."
+        if not now:
+            suffix = " Queue is empty."
+        else:
+            verb = "Now" if removed_active else "Still"
+            suffix = " %s reading %s." % (verb, _display_title(now[1], now[3]))
         print("Removed %s.%s" % (removed_title, suffix))
     else:
         print("Removed %d queued item%s." %
@@ -767,7 +793,7 @@ def cmd_reader(_args):
         config = tbstate.load_config()
         position, total = tbstate.read_pos(), tbstate.stream_count()
         current = tbstate.item_at(position)
-        title = current[3] if current else None
+        title = _display_title(current[1], current[3]) if current else None
         return (current_line(), title, position, total, config["mode"])
 
     def advance(step):

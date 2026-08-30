@@ -356,6 +356,29 @@ class RoundTripTest(IsolatedStateCase):
         self.assertIn("Removed untitled", removed.stdout)
         self.assertIn("Queue is empty", removed.stdout)
 
+    def test_blank_title_from_an_old_stream_index_is_repaired_when_displayed(self):
+        self.tbstate.save_item("untitled", {"title": "  ", "kind": "book"}, ["line"])
+        self.tbstate.save_queue({"items": ["untitled"]})
+        self.tbstate.rebuild_stream()
+        self.tbstate.atomic_write(self.tbstate.path("stream.idx"), "1\tuntitled\tbook\t\n")
+
+        self.assertIn("untitled", self.run_cli("queue").stdout)
+        removed = self.run_cli("queue", "rm", "1")
+        self.assertIn("Removed untitled", removed.stdout)
+
+    def test_queue_remove_by_id_recovers_an_item_missing_from_the_stream_index(self):
+        self.tbstate.save_item("healthy", {"title": "Healthy", "kind": "book"}, ["line"])
+        self.tbstate.save_queue({"items": ["healthy", "missing-fragments"]})
+        self.tbstate.rebuild_stream()
+        listing = self.run_cli("queue").stdout
+        self.assertIn("missing-fragments", listing)
+        self.assertIn("unavailable", listing)
+
+        removed = self.run_cli("queue", "rm", "missing-fragments")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertIn("Removed missing-fragments", removed.stdout)
+        self.assertEqual(self.tbstate.load_queue()["items"], ["healthy"])
+
     def test_removing_last_book_falls_back_to_previous_and_names_it(self):
         self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1"])
         self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1"])
@@ -367,6 +390,16 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(removed.returncode, 0, removed.stderr)
         self.assertIn("Now reading Alpha", removed.stdout)
         self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "a1")
+
+    def test_removing_an_inactive_book_says_reading_continues(self):
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1"])
+        self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+
+        removed = self.run_cli("queue", "rm", "2")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertIn("Still reading Alpha", removed.stdout)
 
     def test_reimport_preserves_position_in_a_later_item(self):
         first = os.path.join(self.config_dir, "first.txt")
