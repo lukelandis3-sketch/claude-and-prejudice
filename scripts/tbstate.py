@@ -15,6 +15,7 @@ import json
 import os
 import tempfile
 import time
+import shutil
 from contextlib import contextmanager
 
 DEFAULT_CONFIG = {
@@ -28,6 +29,7 @@ DEFAULT_CONFIG = {
 }
 
 VALID_MODES = ("timer", "turn", "manual")
+STREAM_SHARD_LINES = 256
 
 
 def config_dir():
@@ -215,6 +217,15 @@ def stream_path():
     return path("stream.txt")
 
 
+def stream_generation():
+    return _read(path("stream.gen"), "").strip()
+
+
+def stream_generation_dir(generation=None):
+    generation = generation or stream_generation()
+    return path("stream-generations", generation) if generation else ""
+
+
 def stream_count():
     """Line count of the reading stream, from the cache written by rebuild_stream."""
     raw = _read(path("count"), "").strip()
@@ -231,6 +242,20 @@ def stream_line(index):
     """1-based lookup into the reading stream. Empty string when out of range."""
     if index < 1:
         return ""
+    generation = stream_generation()
+    if generation:
+        shard = (index - 1) // STREAM_SHARD_LINES
+        row = (index - 1) % STREAM_SHARD_LINES + 1
+        target = os.path.join(stream_generation_dir(generation), "%d.txt" % shard)
+        try:
+            with open(target, encoding="utf-8") as fh:
+                for number, line in enumerate(fh, 1):
+                    if number == row:
+                        return line.rstrip("\n")
+        except OSError:
+            return ""
+        return ""
+    # Migration fallback: SessionStart rebuilds old streams into a generation.
     try:
         with open(stream_path(), encoding="utf-8") as fh:
             for number, line in enumerate(fh, 1):
@@ -290,7 +315,41 @@ def rebuild_stream():
     atomic_write(path("stream.idx"), ("\n".join(index_rows) + "\n") if index_rows else "")
     # Cached so the hot path never has to count lines in a whole novel.
     atomic_write(path("count"), "%d\n" % len(chunks))
+    _publish_stream_generation(chunks)
     return len(chunks)
+
+
+def _publish_stream_generation(lines):
+    """Publish immutable bounded-size lookup shards through one atomic pointer."""
+    root = path("stream-generations")
+    os.makedirs(root, exist_ok=True)
+    generation = "%x-%x" % (time.time_ns(), os.getpid())
+    target = os.path.join(root, generation)
+    os.makedirs(target)
+    for start in range(0, len(lines), STREAM_SHARD_LINES):
+        shard = lines[start:start + STREAM_SHARD_LINES]
+        atomic_write(
+            os.path.join(target, "%d.txt" % (start // STREAM_SHARD_LINES)),
+            "\n".join(shard) + "\n",
+        )
+    atomic_write(os.path.join(target, "count"), "%d\n" % len(lines))
+    atomic_write(path("stream.gen"), generation + "\n")
+
+    # The previous generation covers a reader that observed the old pointer immediately
+    # before publication. Anything older can no longer be referenced.
+    generations = []
+    for name in os.listdir(root):
+        candidate = os.path.join(root, name)
+        if os.path.isdir(candidate):
+            try:
+                generations.append((os.stat(candidate).st_mtime_ns, candidate))
+            except OSError:
+                pass
+    for _mtime, obsolete in sorted(generations, reverse=True)[2:]:
+        try:
+            shutil.rmtree(obsolete)
+        except OSError:
+            pass
 
 
 def load_index():

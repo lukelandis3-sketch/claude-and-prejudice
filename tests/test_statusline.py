@@ -18,6 +18,24 @@ class StatusLineTest(IsolatedStateCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "Call me Ishmael.")
 
+    def test_reads_first_and_last_lines_across_shards(self):
+        lines = ["line-%d" % n for n in range(1, 515)]
+        self.seed_stream(lines, mode="manual")
+        for position in (1, 256, 257, 512, 513, 514):
+            with self.subTest(position=position):
+                self.tbstate.write_pos(position)
+                self.assertEqual(self.run_statusline().stdout.strip(), lines[position - 1])
+
+    def test_missing_or_corrupt_generation_is_silent(self):
+        self.seed_stream(["one"], mode="manual")
+        for raw in ("missing-generation\n", "../../bad\n", "not valid !\n"):
+            with self.subTest(raw=raw):
+                self.tbstate.atomic_write(self.tbstate.path("stream.gen"), raw)
+                result = self.run_statusline()
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(result.stderr, "")
+
     def test_timer_mode_advances_once_the_dwell_has_passed(self):
         self.seed_stream(["one", "two", "three"], mode="timer", dwell=1)
         self.tbstate.write_last_advance(time.time() - 10)
@@ -141,6 +159,19 @@ class StatusLineTest(IsolatedStateCase):
         result = self.run_statusline()
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "")
+
+    def test_large_stdin_without_a_wrapper_is_drained_and_silent(self):
+        self.seed_stream(["one"], statusline=False)
+        result = self.run_statusline(stdin_json="x" * (1024 * 1024))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
+    def test_numeric_state_reads_do_not_spawn_cat_or_tr(self):
+        with open(STATUSLINE) as fh:
+            source = fh.read()
+        self.assertNotIn('cat "$TB_DIR/pos"', source)
+        self.assertNotIn("tr -d", source)
 
     def test_empty_stream_prints_nothing(self):
         self.tbstate.save_queue({"items": []})

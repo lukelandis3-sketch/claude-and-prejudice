@@ -20,11 +20,19 @@ export TB_IN_STATUSLINE
 
 TB_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/thinking-book"
 
-# Claude Code pipes session JSON on stdin; a wrapped status line still expects it.
-STDIN_JSON=$(cat 2>/dev/null || true)
+# Claude Code pipes session JSON on stdin. Retain it only when a wrapped status line
+# needs the bytes; otherwise drain it without a command-substitution copy in memory.
+HAS_WRAPPED=0
+STDIN_JSON=''
+if [ -s "$TB_DIR/wrapped.cmd" ]; then
+    HAS_WRAPPED=1
+    STDIN_JSON=$(cat 2>/dev/null || true)
+else
+    cat >/dev/null 2>&1 || true
+fi
 
 emit_wrapped() {
-    [ -f "$TB_DIR/wrapped.cmd" ] || return 0
+    [ "$HAS_WRAPPED" = "1" ] || return 0
     wrapped=$(cat "$TB_DIR/wrapped.cmd" 2>/dev/null) || return 0
     [ -n "$wrapped" ] || return 0
     printf '%s' "$STDIN_JSON" | sh -c "$wrapped" 2>/dev/null || true
@@ -52,16 +60,31 @@ if [ "$TB_STATUSLINE" = "1" ] && [ ! -f "$TB_DIR/statusline.live" ]; then
 fi
 
 read_int() {
-    value=$(cat "$1" 2>/dev/null | tr -d ' \n\r') || value=''
+    destination=$1
+    value=''
+    IFS= read -r value 2>/dev/null < "$2" || value=''
     case "$value" in
-        ''|*[!0-9]*) printf '%s' "$2" ;;
-        *) printf '%s' "$value" ;;
+        ''|*[!0-9]*) value=$3 ;;
     esac
+    # `value` is digits or a trusted numeric default, so this assignment cannot inject
+    # shell syntax. Avoiding command substitution here removes one fork per state value.
+    eval "$destination=\$value"
 }
 
-POS=$(read_int "$TB_DIR/pos" 1)
-LAST=$(read_int "$TB_DIR/last" 0)
-COUNT=$(read_int "$TB_DIR/count" 0)
+read_int POS "$TB_DIR/pos" 1
+read_int LAST "$TB_DIR/last" 0
+GEN=''
+IFS= read -r GEN 2>/dev/null < "$TB_DIR/stream.gen" || GEN=''
+case "$GEN" in
+    ''|*[!0-9a-f-]*) GEN='' ;;
+esac
+if [ -n "$GEN" ]; then
+    STREAM_DIR="$TB_DIR/stream-generations/$GEN"
+    read_int COUNT "$STREAM_DIR/count" 0
+else
+    STREAM_DIR=''
+    COUNT=0
+fi
 
 [ "$POS" -lt 1 ] && POS=1
 
@@ -86,11 +109,16 @@ if [ "$TB_STATUSLINE" = "1" ] && [ "$TB_PAUSED" = "0" ] && [ "$TB_MODE" = "timer
 fi
 
 LINE=''
-if [ "$TB_STATUSLINE" = "1" ] && [ -f "$TB_DIR/stream.txt" ]; then
-    LINE=$(awk -v n="$POS" 'NR==n{print;exit}' "$TB_DIR/stream.txt" 2>/dev/null) || LINE=''
+if [ "$TB_STATUSLINE" = "1" ] && [ -n "$STREAM_DIR" ] && [ "$POS" -le "$COUNT" ]; then
+    SHARD=$(((POS - 1) / 256))
+    ROW=$(((POS - 1) % 256 + 1))
+    LINE=$(sed -n "${ROW}p" "$STREAM_DIR/$SHARD.txt" 2>/dev/null) || LINE=''
 fi
 
-WRAPPED_OUT=$(emit_wrapped)
+WRAPPED_OUT=''
+if [ "$HAS_WRAPPED" = "1" ]; then
+    WRAPPED_OUT=$(emit_wrapped)
+fi
 
 if [ -n "$WRAPPED_OUT" ] && [ -n "$LINE" ]; then
     printf '%s\n%s%s\n' "$WRAPPED_OUT" "$TB_PREFIX" "$LINE"

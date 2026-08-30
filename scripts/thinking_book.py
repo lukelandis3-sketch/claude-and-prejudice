@@ -668,7 +668,7 @@ def cmd_sync(args):
         pass
     config = tbstate.load_config()
     tbstate.write_hot_env(config)
-    if tbstate.stream_count() == 0:
+    if tbstate.stream_count() == 0 or not tbstate.stream_generation():
         tbstate.rebuild_stream()
     sync_spinner(config)
     if not config["paused"] and _feeds_due():

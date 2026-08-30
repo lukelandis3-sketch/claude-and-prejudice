@@ -39,6 +39,14 @@ class StreamTest(IsolatedStateCase):
         self.assertEqual(self.tbstate.rebuild_stream(), 1)
         self.assertEqual(self.tbstate.item_at(1)[1], "real")
 
+    def test_stream_generation_handles_shard_boundaries(self):
+        lines = ["line-%d" % n for n in range(1, 515)]
+        self.seed_stream(lines, mode="manual")
+        self.assertTrue(self.tbstate.stream_generation())
+        for position in (1, 256, 257, 512, 513, 514):
+            with self.subTest(position=position):
+                self.assertEqual(self.tbstate.stream_line(position), lines[position - 1])
+
 
 class ConfigTest(IsolatedStateCase):
     def test_defaults_applied_to_partial_config(self):
