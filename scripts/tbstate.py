@@ -154,7 +154,8 @@ def load_config():
         merged["dwell_seconds"] = max(1, int(merged.get("dwell_seconds", 8)))
     except (TypeError, ValueError):
         merged["dwell_seconds"] = DEFAULT_CONFIG["dwell_seconds"]
-    surfaces = merged.get("surfaces") or {}
+    surfaces = merged.get("surfaces")
+    surfaces = surfaces if isinstance(surfaces, dict) else {}
     merged["surfaces"] = {
         "statusline": bool(surfaces.get("statusline", True)),
         "spinner": bool(surfaces.get("spinner", True)),
@@ -326,9 +327,9 @@ def rebuild_stream():
         line_no += len(lines)
     atomic_write(stream_path(), ("\n".join(chunks) + "\n") if chunks else "")
     atomic_write(path("stream.idx"), ("\n".join(index_rows) + "\n") if index_rows else "")
-    # Cached so the hot path never has to count lines in a whole novel.
-    atomic_write(path("count"), "%d\n" % len(chunks))
     _publish_stream_generation(chunks)
+    # Cached for Python callers. Publish the internally consistent shell generation first.
+    atomic_write(path("count"), "%d\n" % len(chunks))
     return len(chunks)
 
 

@@ -37,6 +37,10 @@ def written_path():
     return tbstate.path("settings.written.json")
 
 
+def migration_path():
+    return tbstate.path("settings.legacy-pending.json")
+
+
 def ensure_settings_file():
     """Create settings.json if absent.
 
@@ -102,15 +106,42 @@ def _legacy_original(key):
     return _MISSING
 
 
-def _remember_origins(settings, keys, use_legacy=False):
+def _legacy_pending():
+    if not os.path.exists(migration_path()):
+        _initialize_legacy_pending()
+    data = tbstate.read_json(migration_path(), {"keys": []})
+    keys = data.get("keys") if isinstance(data, dict) else []
+    return list(keys) if isinstance(keys, list) else []
+
+
+def _initialize_legacy_pending():
+    if os.path.exists(migration_path()):
+        return
+    # A JSON backup without a v0.4 raw backup is the pre-v0.4 state. Preserve the legacy
+    # original independently for each key; the keys may first be touched on different turns.
+    keys = ([SPINNER_KEY, STATUSLINE_KEY]
+            if os.path.exists(backup_path()) and not os.path.exists(raw_backup_path()) else [])
+    tbstate.write_json(migration_path(), {"keys": keys})
+
+
+def _consume_legacy(key):
+    pending = _legacy_pending()
+    if key in pending:
+        pending = [item for item in pending if item != key]
+        tbstate.write_json(migration_path(), {"keys": pending})
+
+
+def _remember_origins(settings, keys):
     origins = tbstate.read_json(origins_path(), {})
+    pending = _legacy_pending()
     changed = False
     for key in keys:
         if key in origins:
             continue
         legacy = _legacy_original(key)
-        if use_legacy:
+        if key in pending:
             present, value = legacy is not _MISSING, legacy
+            _consume_legacy(key)
         else:
             present, value = key in settings, settings.get(key)
         origins[key] = {"present": present}
@@ -133,6 +164,7 @@ def _retire(keys):
         if isinstance(written, dict) and key in written:
             written.pop(key)
             written_changed = True
+        _consume_legacy(key)
     # Keep the files (even empty) to distinguish a completed migration cycle from a
     # pre-v0.4 install that has only settings.backup.json.
     if origins_changed or not os.path.exists(origins_path()):
@@ -146,8 +178,9 @@ def _original(key, fallback=_MISSING):
     record = origins.get(key) if isinstance(origins, dict) else None
     if isinstance(record, dict) and "present" in record:
         return record.get("value") if record["present"] else _MISSING
-    legacy = _legacy_original(key)
-    return fallback if legacy is _MISSING else legacy
+    if key in _legacy_pending():
+        return _legacy_original(key)
+    return fallback
 
 
 def _record_written(key, value):
@@ -161,6 +194,15 @@ def _last_written(key):
     return written.get(key, _MISSING) if isinstance(written, dict) else _MISSING
 
 
+def _owns_key(key):
+    origins = tbstate.read_json(origins_path(), {})
+    return (
+        _last_written(key) is not _MISSING or
+        (isinstance(origins, dict) and key in origins) or
+        key in _legacy_pending()
+    )
+
+
 def update(mutator, touched=(), record_key=None, retire=()):
     """Read-modify-write settings.json under a lock, backing it up before the first edit.
 
@@ -168,6 +210,7 @@ def update(mutator, touched=(), record_key=None, retire=()):
     """
     with tbstate.locked("settings.lock"):
         ensure_settings_file()
+        _initialize_legacy_pending()
         settings = read_settings()
         before = json.loads(json.dumps(settings))
         mutator(settings)
@@ -178,9 +221,8 @@ def update(mutator, touched=(), record_key=None, retire=()):
         with open(tbstate.settings_path(), "rb") as fh:
             raw = fh.read()
         _raw_backup_once(raw)
-        legacy = os.path.exists(backup_path()) and not os.path.exists(origins_path())
         _backup_once(before)
-        _remember_origins(before, touched, use_legacy=legacy)
+        _remember_origins(before, touched)
         tbstate.write_json(tbstate.settings_path(), settings)
         if record_key is not None:
             _record_written(record_key, settings[record_key])
@@ -216,19 +258,13 @@ def clear_spinner():
     """
     original = _original(SPINNER_KEY)
     last_written = _last_written(SPINNER_KEY)
+    owned = _owns_key(SPINNER_KEY)
 
     def mutate(settings):
         live = settings.get(SPINNER_KEY, _MISSING)
-        # A post-write user edit wins. Legacy installs have no written record, so retain
-        # the old one-element replace recognition solely for migration.
-        legacy_ours = (
-            last_written is _MISSING and os.path.exists(backup_path()) and
-            isinstance(live, dict) and live.get("mode") == "replace" and
-            isinstance(live.get("verbs"), list) and len(live["verbs"]) == 1
-        )
-        if live is _MISSING or (last_written is not _MISSING and live != last_written):
+        if not owned:
             return
-        if last_written is _MISSING and not legacy_ours:
+        if live is _MISSING or (last_written is not _MISSING and live != last_written):
             return
         if original is not _MISSING:
             settings[SPINNER_KEY] = original
@@ -308,8 +344,11 @@ def restore_statusline(original):
 
     saved = _original(STATUSLINE_KEY, fallback=original if original is not None else _MISSING)
     last_written = _last_written(STATUSLINE_KEY)
+    owned = _owns_key(STATUSLINE_KEY) or original is not None
 
     def mutate(settings):
+        if not owned:
+            return
         live = settings.get(STATUSLINE_KEY, _MISSING)
         if last_written is not _MISSING and live != last_written:
             return

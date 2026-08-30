@@ -251,11 +251,15 @@ def cmd_feed(args):
     if action == "add":
         import feed as feedmod
         meta, entries = feedmod.load(url)
-        if any(entry["url"] == url for entry in data["feeds"]):
-            print("Already subscribed to %s" % url)
-            return
-        data["feeds"].append({"url": url, "title": meta.get("title"), "last_checked": 0, "seen": []})
-        save_feeds(data)
+        with tbstate.locked("feeds.lock"):
+            data = load_feeds()
+            if any(entry["url"] == url for entry in data["feeds"]):
+                print("Already subscribed to %s" % url)
+                return
+            data["feeds"].append({
+                "url": url, "title": meta.get("title"), "last_checked": 0, "seen": [],
+            })
+            save_feeds(data)
         print("Subscribed to %s (%d entries available); fetching in the background."
               % (meta.get("title") or url, len(entries)))
         # Never fetch every subscription synchronously inside a slash command -- that is
@@ -265,9 +269,11 @@ def cmd_feed(args):
         except Exception:
             pass
     elif action == "rm":
-        before = len(data["feeds"])
-        data["feeds"] = [entry for entry in data["feeds"] if entry["url"] != url]
-        save_feeds(data)
+        with tbstate.locked("feeds.lock"):
+            data = load_feeds()
+            before = len(data["feeds"])
+            data["feeds"] = [entry for entry in data["feeds"] if entry["url"] != url]
+            save_feeds(data)
         print("Removed %s" % url if len(data["feeds"]) < before else "Not subscribed to %s" % url)
     else:
         raise SystemExit("unknown feed action %r" % action)
@@ -312,7 +318,25 @@ def refresh_feeds(force=False):
                 continue
             seen.append(item["link"])
         entry["seen"] = seen[-500:]
-    save_feeds(data)
+    # Network work happened without a lock. Merge its results into the latest subscription
+    # set so a concurrent add survives and a concurrently removed feed stays removed.
+    updates = {entry.get("url"): entry for entry in data["feeds"] if entry.get("url")}
+    with tbstate.locked("feeds.lock"):
+        latest = load_feeds()
+        for live in latest["feeds"]:
+            refreshed = updates.get(live.get("url"))
+            if not refreshed:
+                continue
+            live["title"] = live.get("title") or refreshed.get("title")
+            live["last_checked"] = max(
+                float(live.get("last_checked") or 0),
+                float(refreshed.get("last_checked") or 0),
+            )
+            combined = list(dict.fromkeys(
+                list(live.get("seen") or []) + list(refreshed.get("seen") or [])
+            ))
+            live["seen"] = combined[-500:]
+        save_feeds(latest)
     return added
 
 
@@ -350,7 +374,7 @@ def is_our_statusline(entry):
     if isinstance(entry, dict):
         command = entry.get("command") or ""
     else:
-        command = entry or ""
+        command = entry if isinstance(entry, str) else ""
     if not command or SCRIPT_NAME not in command:
         return False
     if "thinking-book" in command or "thinking_book" in command:
@@ -493,10 +517,13 @@ def cmd_refresh(args):
     config = tbstate.update_config(
         lambda live: live.update({"statusline_refresh_interval": interval})
     )
-    if config["surfaces"]["statusline"]:
+    live = as_statusline_entry(tbsettings.current_statusline())
+    if config["surfaces"]["statusline"] and live and is_our_statusline(live):
         tbsettings.set_statusline(
             statusline_command(),
             refresh_interval=config.get("statusline_refresh_interval"))
+    elif config["surfaces"]["statusline"]:
+        message += " Run /book pane on first to apply it without replacing your status line."
     print(message)
 
 
@@ -779,7 +806,9 @@ def cmd_sync(args):
         pass
     config = tbstate.load_config()
     tbstate.write_hot_env(config)
-    if tbstate.stream_count() == 0 or not tbstate.stream_generation():
+    generation_dir = tbstate.stream_generation_dir()
+    if (tbstate.stream_count() == 0 or not tbstate.stream_generation()
+            or not generation_dir or not os.path.isdir(generation_dir)):
         with tbstate.locked():
             tbstate.rebuild_stream()
     sync_spinner(config)
@@ -807,7 +836,8 @@ def cmd_advance(args):
     mode = config["mode"]
     if mode == "turn":
         advance_by(1)
-    elif mode == "timer" and not os.path.exists(statusline_live_path()):
+    elif mode == "timer" and not (
+            config["surfaces"]["statusline"] and os.path.exists(statusline_live_path())):
         last = tbstate.read_last_advance()
         if not last:
             # Cold start: show this line and start the clock rather than skipping it.
