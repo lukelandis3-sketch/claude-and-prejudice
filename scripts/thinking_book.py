@@ -542,10 +542,11 @@ def _queue_entries(rows=None):
     current = tbstate.locate_position(tbstate.read_pos(), rows=rows, total=total)
     bookmarks = tbstate.load_bookmarks()
     entries = []
-    for number, row in enumerate(rows, 1):
+    for offset_in_rows, row in enumerate(rows):
+        number = offset_in_rows + 1
         _start, item_id, kind, title = row
-        bounds = tbstate.item_bounds(item_id, rows=rows, total=total)
-        length = bounds[1] - bounds[0] + 1
+        end = rows[offset_in_rows + 1][0] - 1 if number < len(rows) else total
+        length = max(1, end - row[0] + 1)
         active = bool(current and current[0] == item_id)
         offset = current[1] if active else bookmarks.get(item_id, 1)
         try:
@@ -565,10 +566,12 @@ def _resolve_queue_item(query, rows=None):
     query = query.strip()
     entries = _queue_entries(rows)
     folded = query.casefold()
-    matches = [entry for entry in entries
-               if entry["id"] == query or entry["title"].casefold() == folded]
-    if not matches and query.isdigit():
+    matches = []
+    if query.isdecimal():
         matches = [entry for entry in entries if entry["number"] == int(query)]
+    if not matches:
+        matches = [entry for entry in entries
+                   if entry["id"] == query or entry["title"].casefold() == folded]
     if not matches:
         matches = [entry for entry in entries if folded in entry["title"].casefold()]
     if not matches:
@@ -580,6 +583,7 @@ def _resolve_queue_item(query, rows=None):
                             for entry in matches)
         raise SystemExit("%r is ambiguous: %s" % (query, choices))
     return matches[0]
+
 
 def cmd_next(args):
     steps = int(args[0]) if args and args[0].lstrip("-").isdigit() else 1
@@ -605,21 +609,18 @@ def cmd_status(_args):
         return
 
     rows = tbstate.load_index()
-    current = tbstate.item_at(position)
-    logical = tbstate.locate_position(position, rows=rows, total=total)
-    bounds = tbstate.item_bounds(current[1], rows=rows, total=total) if current else None
-    offset = logical[1] if logical else position
-    length = bounds[1] - bounds[0] + 1 if bounds else total
+    entries = _queue_entries(rows)
+    active = next((entry for entry in entries if entry["active"]), None)
+    offset = active["offset"] if active else position
+    length = active["length"] if active else total
     percent = (offset / length) * 100
-    print("Reading:  %s" % (current[3] if current else "(unknown)"))
-    meta = tbstate.item_meta(current[1]) if current else {}
+    print("Reading:  %s" % (active["title"] if active else "(unknown)"))
+    meta = tbstate.item_meta(active["id"]) if active else {}
     if meta.get("author"):
         print("Author:   %s" % meta["author"])
     print("Position: line %d of %d  (%.1f%%)" % (offset, length, percent))
-    if len(rows) > 1 and current:
-        book_number = next((number for number, row in enumerate(rows, 1)
-                            if row[1] == current[1]), 1)
-        print("Library:  book %d of %d" % (book_number, len(rows)))
+    if len(rows) > 1 and active:
+        print("Library:  book %d of %d" % (active["number"], len(rows)))
     print("Mode:     %s%s (dwell %ss)" % (config["mode"], " [paused]" if config["paused"] else "", config["dwell_seconds"]))
     print("Surfaces: statusline=%s spinner=%s" % (
         "on" if config["surfaces"]["statusline"] else "off",
@@ -629,7 +630,7 @@ def cmd_status(_args):
 
     if len(rows) > 1:
         print("\nQueue:")
-        for entry in _queue_entries(rows):
+        for entry in entries:
             marker = "->" if entry["active"] else "  "
             print("  %d. %s %s" % (entry["number"], marker, entry["title"]))
 
@@ -666,7 +667,7 @@ def cmd_queue(args):
         tbstate.rebuild_stream()
         tbstate.restore_position(logical, old_items=old_items)
     sync_spinner()
-    if removed_title:
+    if action == "rm":
         now = tbstate.item_at(tbstate.read_pos())
         suffix = " Now reading %s." % now[3] if now else " Queue is empty."
         print("Removed %s.%s" % (removed_title, suffix))
@@ -679,17 +680,18 @@ def cmd_open(args):
     if not args:
         raise SystemExit("usage: /book open <number-or-title>")
     query = " ".join(args).strip()
-    rows = tbstate.load_index()
-    selected = _resolve_queue_item(query, rows=rows)
-
     with tbstate.locked():
+        rows = tbstate.load_index()
+        selected = _resolve_queue_item(query, rows=rows)
         tbstate.capture_position()
         item_id, title = selected["id"], selected["title"]
         offset = tbstate.load_bookmarks().get(item_id, 1)
         position = tbstate.resolve_position(item_id, offset)
-        tbstate.write_pos(position or 1)
+        if position is None:
+            raise SystemExit("%s is no longer queued; run /book queue and try again." % title)
+        tbstate.write_pos(position)
         tbstate.write_last_advance()
-        resolved = tbstate.locate_position(position or 1)
+        resolved = tbstate.locate_position(position)
         offset = resolved[1] if resolved else 1
         tbstate.save_bookmark(item_id, offset)
     sync_spinner()

@@ -5,6 +5,13 @@ from support import IsolatedStateCase
 
 
 class StreamTest(IsolatedStateCase):
+    def test_load_queue_filters_invalid_and_duplicate_item_ids(self):
+        self.tbstate.write_json(
+            self.tbstate.path("queue.json"),
+            {"items": ["a", "a", None, 7, "", "b", "a"]},
+        )
+        self.assertEqual(self.tbstate.load_queue(), {"items": ["a", "b"]})
+
     def test_rebuild_concatenates_items_in_queue_order(self):
         self.tbstate.save_item("a", {"title": "Book A", "kind": "book"}, ["a1", "a2"])
         self.tbstate.save_item("b", {"title": "Book B", "kind": "article"}, ["b1"])

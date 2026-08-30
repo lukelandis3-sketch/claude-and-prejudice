@@ -286,7 +286,10 @@ def stream_line(index):
 def load_queue():
     queue = read_json(path("queue.json"), {"items": []})
     items = queue.get("items")
-    return {"items": list(items) if isinstance(items, list) else []}
+    if not isinstance(items, list):
+        return {"items": []}
+    valid = (item for item in items if isinstance(item, str) and item)
+    return {"items": list(dict.fromkeys(valid))}
 
 
 def save_queue(queue):
@@ -323,7 +326,7 @@ def rebuild_stream():
         if not lines:
             continue
         meta = item_meta(item_id)
-        title = " ".join(str(meta.get("title") or item_id).split())
+        title = " ".join(str(meta.get("title") or "").split()) or item_id
         kind = meta.get("kind", "text")
         index_rows.append("%d\t%s\t%s\t%s" % (line_no, item_id, kind, title))
         chunks.extend(lines)

@@ -289,6 +289,17 @@ class RoundTripTest(IsolatedStateCase):
         self.assertIn("Opened Beta", result.stdout)
         self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "b1")
 
+    def test_displayed_number_wins_over_another_books_numeric_title(self):
+        for item, title in (("a", "Alpha"), ("b", "Beta"), ("c", "2")):
+            self.tbstate.save_item(item, {"title": title, "kind": "book"}, [item + "1"])
+        self.tbstate.save_queue({"items": ["a", "b", "c"]})
+        self.tbstate.rebuild_stream()
+
+        result = self.run_cli("open", "2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Opened Beta", result.stdout)
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "b1")
+
     def test_reimporting_the_same_book_does_not_duplicate_it(self):
         self.run_cli("load", self.book)
         first_total = self.tbstate.stream_count()
@@ -333,6 +344,29 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(missing.returncode, 1)
         self.assertIn("no queued item matches", missing.stderr)
         self.assertEqual(self.tbstate.load_queue()["items"], ["a"])
+
+    def test_blank_title_uses_the_item_id_in_queue_and_remove_confirmation(self):
+        self.tbstate.save_item("untitled", {"title": "  ", "kind": "book"}, ["line"])
+        self.tbstate.save_queue({"items": ["untitled"]})
+        self.tbstate.rebuild_stream()
+
+        self.assertIn("untitled", self.run_cli("queue").stdout)
+        removed = self.run_cli("queue", "rm", "1")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertIn("Removed untitled", removed.stdout)
+        self.assertIn("Queue is empty", removed.stdout)
+
+    def test_removing_last_book_falls_back_to_previous_and_names_it(self):
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1"])
+        self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        self.tbstate.write_pos(2)
+
+        removed = self.run_cli("queue", "rm", "2")
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        self.assertIn("Now reading Alpha", removed.stdout)
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "a1")
 
     def test_reimport_preserves_position_in_a_later_item(self):
         first = os.path.join(self.config_dir, "first.txt")
