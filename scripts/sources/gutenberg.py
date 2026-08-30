@@ -28,18 +28,6 @@ PREFERRED_FORMATS = (
 )
 
 
-def search(query, limit=5):
-    """Return [(id, title, author)] for a free-text query."""
-    url = "%s?search=%s" % (API, urllib.parse.quote(query))
-    payload = json.loads(fetch.get(url, accept="application/json"))
-    results = []
-    for book in payload.get("results", [])[:limit]:
-        authors = book.get("authors") or []
-        author = authors[0].get("name") if authors else None
-        results.append((book.get("id"), book.get("title"), author))
-    return results
-
-
 def _text_url(formats):
     for key in PREFERRED_FORMATS:
         for available, url in formats.items():

@@ -115,12 +115,13 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(dashboard.returncode, 0, dashboard.stderr)
         self.assertIn("📖 The Test Voyage", dashboard.stdout)
         self.assertIn("1/", dashboard.stdout)
-        self.assertIn("Next: !", dashboard.stdout)
+        self.assertIn("Next:", dashboard.stdout)
         self.assertIn("install-cli", dashboard.stdout)
-        self.assertIn(os.path.join(support.REPO, "bin", "tb"), dashboard.stdout)
-        self.assertIn("More: /book help", dashboard.stdout)
+        self.assertIn("/book help", dashboard.stdout)
         self.assertNotIn("All commands:", dashboard.stdout)
         self.assertNotIn("thinking-book 0.", dashboard.stdout)
+        self.assertNotIn("Current:", dashboard.stdout)
+        self.assertLessEqual(len(dashboard.stdout.strip().splitlines()), 4)
 
     def test_dashboard_ignores_an_unrelated_tb_executable(self):
         fake_bin = os.path.join(self.config_dir, "fake-bin")
@@ -132,7 +133,7 @@ class RoundTripTest(IsolatedStateCase):
         self.run_cli("load", self.book)
 
         dashboard = self.run_cli("", env={"PATH": fake_bin})
-        self.assertIn(os.path.join(support.REPO, "bin", "tb"), dashboard.stdout)
+        self.assertIn("install-cli", dashboard.stdout)
         self.assertNotIn("Next: !tb n", dashboard.stdout)
 
     def test_add_accepts_an_unquoted_file_path_with_spaces(self):
@@ -454,7 +455,7 @@ class RoundTripTest(IsolatedStateCase):
     def test_start_without_any_book_asks_for_one_concisely(self):
         result = self.run_cli("start")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("title, URL, or file path", result.stderr)
+        self.assertIn("/book <title|url|file>", result.stderr)
         self.assertNotIn("/thinking-book", result.stderr)
         self.assertLessEqual(len(result.stderr.splitlines()), 1)
 
@@ -469,7 +470,7 @@ class RoundTripTest(IsolatedStateCase):
             self.tbstate.load_config()["surfaces"],
             {"statusline": False, "spinner": True},
         )
-        self.assertIn("/thinking-book:book pane on", result.stdout)
+        self.assertIn("/book pane on", result.stdout)
         self.assertLessEqual(len(result.stdout.splitlines()), 2, result.stdout)
         generation = self.tbstate.stream_generation_dir()
         self.assertFalse(os.path.exists(os.path.join(generation, "0.hud")))
@@ -523,6 +524,21 @@ class RoundTripTest(IsolatedStateCase):
         finally:
             thinking_book.cmd_gutenberg = original
         self.assertEqual(calls, [(["A title"], False)])
+
+    def test_gutenberg_network_error_is_concise_and_actionable(self):
+        import fetch
+        import gutenberg
+        import thinking_book
+        original = gutenberg.load
+        gutenberg.load = lambda _query: (_ for _ in ()).throw(
+            fetch.FetchError("could not fetch a long third-party URL"))
+        try:
+            with self.assertRaisesRegex(SystemExit, "Project Gutenberg") as raised:
+                thinking_book.cmd_gutenberg(["Moby Dick"])
+        finally:
+            gutenberg.load = original
+        self.assertIn("file", str(raised.exception).lower())
+        self.assertNotIn("gutendex", str(raised.exception).lower())
 
     def test_concurrent_starts_leave_complete_config_and_valid_settings(self):
         paths = []
@@ -630,6 +646,13 @@ class RoundTripTest(IsolatedStateCase):
         self.assertIn("off — /book on", dashboard.stdout)
         self.assertNotIn("Pause: /book pause", dashboard.stdout)
 
+    def test_empty_states_use_the_direct_book_shorthand(self):
+        for command in ((), ("next",), ("sync",)):
+            with self.subTest(command=command):
+                result = self.run_cli(*command)
+                self.assertIn("/book <title|url|file>", result.stdout)
+                self.assertNotIn("/book add <title|url|file>", result.stdout)
+
     def test_dashboard_reports_damaged_queue_instead_of_calling_it_empty(self):
         self.tbstate.save_queue({"items": ["missing-fragments"]})
         self.tbstate.rebuild_stream()
@@ -650,6 +673,65 @@ class RoundTripTest(IsolatedStateCase):
         disabled = self.run_cli("hud", "off")
         self.assertEqual(disabled.returncode, 0, disabled.stderr)
         self.assertFalse(self.tbstate.load_config()["hud"])
+
+    def test_enabling_hud_adds_shards_without_republishing_or_moving(self):
+        self.run_cli("load", self.book)
+        self.tbstate.write_pos(2)
+        generation = self.tbstate.stream_generation()
+        enabled = self.run_cli("hud", "on")
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        self.assertEqual(self.tbstate.stream_generation(), generation)
+        self.assertEqual(self.tbstate.read_pos(), 2)
+        self.assertTrue(os.path.exists(os.path.join(
+            self.tbstate.stream_generation_dir(), "0.hud")))
+
+    def test_enabling_hud_repairs_a_missing_shard_without_republishing(self):
+        lines = ["line %d" % number for number in range(300)]
+        self.tbstate.save_item("long", {"title": "Long", "kind": "book"}, lines)
+        self.tbstate.save_queue({"items": ["long"]})
+        self.tbstate.rebuild_stream(include_hud=True)
+        generation = self.tbstate.stream_generation()
+        os.unlink(os.path.join(self.tbstate.stream_generation_dir(), "1.hud"))
+        result = self.run_cli("hud", "on")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tbstate.stream_generation(), generation)
+        self.assertTrue(os.path.exists(os.path.join(
+            self.tbstate.stream_generation_dir(), "1.hud")))
+
+    def test_enabling_hud_rebuilds_a_generation_with_a_corrupt_count(self):
+        self.run_cli("load", self.book)
+        self.tbstate.write_pos(2)
+        generation = self.tbstate.stream_generation()
+        self.tbstate.atomic_write(
+            os.path.join(self.tbstate.stream_generation_dir(), "count"), "broken\n")
+        result = self.run_cli("hud", "on")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(self.tbstate.stream_generation(), generation)
+        self.assertEqual(self.tbstate.read_pos(), 2)
+        self.assertTrue(os.path.exists(os.path.join(
+            self.tbstate.stream_generation_dir(), "0.hud")))
+
+    def test_concurrent_hud_enables_share_the_live_generation(self):
+        self.run_cli("load", self.book)
+        generation = self.tbstate.stream_generation()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _unused: self.run_cli("hud", "on"), range(2)))
+        for result in results:
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tbstate.stream_generation(), generation)
+        self.assertTrue(os.path.exists(os.path.join(
+            self.tbstate.stream_generation_dir(), "0.hud")))
+
+    def test_enabling_an_existing_hud_does_not_recompute_rows(self):
+        self.run_cli("start", self.book)
+        calls = []
+        original = self.tbstate.hud_line
+        self.tbstate.hud_line = lambda *args: calls.append(args) or original(*args)
+        try:
+            self.assertTrue(self.tbstate.ensure_hud_shards())
+        finally:
+            self.tbstate.hud_line = original
+        self.assertEqual(calls, [])
 
     def test_enabling_hud_preserves_logical_bookmark_when_a_prior_item_is_damaged(self):
         self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1", "a2"])
@@ -674,7 +756,7 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertIn("📖 Beta", status.stdout)
         self.assertIn("2/3 (66%)", status.stdout)
-        self.assertIn("Library: book 2 of 2", status.stdout)
+        self.assertIn("book 2/2", status.stdout)
         self.assertNotIn("line 4 of 5", status.stdout)
 
     def test_pane_on_wraps_an_existing_status_line_and_off_restores_it(self):
@@ -781,6 +863,50 @@ class RoundTripTest(IsolatedStateCase):
         self.assertIn("statusline.sh", self.settings()["statusLine"]["command"])
         with open(self.tbstate.path("wrapped.cmd")) as fh:
             self.assertEqual(fh.read().strip(), "my-own-prompt")
+
+    def test_pane_on_names_resume_when_reading_remains_paused(self):
+        self.run_cli("load", self.book)
+        self.run_cli("pause")
+        result = self.run_cli("pane", "on")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.tbstate.load_config()["paused"])
+        self.assertIn("/book resume", result.stdout)
+
+    def test_turn_reads_the_current_line_once(self):
+        import thinking_book
+        self.seed_stream(["one", "two"], mode="manual")
+        calls = []
+        original = thinking_book.current_line
+
+        def counted():
+            calls.append(True)
+            return original()
+
+        thinking_book.current_line = counted
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                thinking_book.cmd_next([])
+        finally:
+            thinking_book.current_line = original
+        self.assertEqual(len(calls), 1)
+
+    def test_open_parses_the_stream_index_once(self):
+        import thinking_book
+        self.run_cli("load", self.book)
+        calls = []
+        original = self.tbstate.load_index
+
+        def counted():
+            calls.append(True)
+            return original()
+
+        self.tbstate.load_index = counted
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                thinking_book.cmd_open(["1"])
+        finally:
+            self.tbstate.load_index = original
+        self.assertEqual(len(calls), 1)
 
     def test_repair_survives_a_string_statusline(self):
         with open(self.tbstate.settings_path(), "w") as fh:

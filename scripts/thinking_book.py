@@ -58,7 +58,7 @@ def statusline_command():
 
 def statusline_live_path():
     session_id = os.environ.get("CLAUDE_CODE_SESSION_ID") or "global"
-    if not re.match(r"^[A-Za-z0-9_-]+$", session_id):
+    if len(session_id) > 64 or not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
         session_id = "global"
     return tbstate.path("statusline.live." + session_id)
 
@@ -88,11 +88,11 @@ def current_line():
 def sync_spinner(config=None):
     """Point spinnerVerbs at the line we are currently on."""
     config = config or tbstate.load_config()
-    if not config["surfaces"]["spinner"]:
-        return
     line = current_line()
-    prefix = config.get("prefix") or ""
-    tbsettings.set_spinner_line((prefix + line) if line else "")
+    if config["surfaces"]["spinner"]:
+        prefix = config.get("prefix") or ""
+        tbsettings.set_spinner_line((prefix + line) if line else "")
+    return line
 
 
 def advance_by(steps):
@@ -203,7 +203,13 @@ def cmd_gutenberg(args, activate=True):
     if not args:
         raise SystemExit("usage: /book gutenberg <search terms|id>")
     import gutenberg
-    meta, text = gutenberg.load(" ".join(args))
+    try:
+        meta, text = gutenberg.load(" ".join(args))
+    except gutenberg.fetch.FetchError:
+        raise SystemExit(
+            "Could not fetch that book from Project Gutenberg. Retry, or use a book "
+            "URL or local file."
+        )
     item_id = _slug("gutenberg", meta.get("gutenberg_id") or meta.get("source"))
     _install(item_id, meta, text)
     if activate:
@@ -346,7 +352,7 @@ def cmd_start(args):
             if position is not None:
                 tbstate.write_pos(position)
     elif not tbstate.load_queue()["items"]:
-        raise SystemExit("Choose a book: start <title, URL, or file path>")
+        raise SystemExit("Choose a book: /book <title|url|file>")
 
     current = tbstate.item_at(tbstate.read_pos())
     title = _display_title(current[1], current[3]) if current else "your book"
@@ -364,12 +370,9 @@ def cmd_start(args):
                 "hud": True,
                 "surfaces": {"statusline": enabled, "spinner": True},
             }))
-            if enabled:
-                generation_dir = tbstate.stream_generation_dir()
-                if (not generation_dir or not os.path.isfile(
-                        os.path.join(generation_dir, "0.hud"))):
-                    with tbstate.rebuilding_stream(include_hud=True):
-                        pass
+            if enabled and not tbstate.ensure_hud_shards():
+                with tbstate.rebuilding_stream(include_hud=True):
+                    pass
         else:
             config = tbstate.update_config(lambda live: live.update({"paused": False}))
         tbstate.write_last_advance()
@@ -385,11 +388,11 @@ def cmd_start(args):
                else "spinner" if surfaces["spinner"] else "off")
     pace = "250 WPM" if args else _pace_label(config)
     extra = " (+%d more)" % (len(written) - 1) if len(written) > 1 else ""
-    print("Ready -- %s%s · %s · %s" % (label, extra, display, pace))
-    if surfaces["statusline"]:
-        print("Next: /thinking-book:n · Local controls: /thinking-book:book install-cli")
-    elif args:
-        print("HUD skipped: your status line is in use. /thinking-book:book pane on adds it.")
+    print("Ready — %s%s · %s · %s" % (label, extra, display, pace))
+    controls = _controls_hint()
+    if not surfaces["statusline"] and args:
+        controls += " · HUD skipped: /book pane on"
+    print(controls)
 
 
 def cmd_source(args):
@@ -665,9 +668,13 @@ def cmd_pane(args):
 
     if action == "on":
         enable_statusline(auto=False)
-        if tbstate.load_config().get("hud"):
-            _set_hud(True)
-        print("Status line reading surface enabled.")
+        config = tbstate.load_config()
+        if config.get("hud"):
+            config = _set_hud(True)
+        message = "Status line reading surface enabled."
+        if config["paused"]:
+            message += " Reading remains paused; /book resume when ready."
+        print(message)
     elif action == "off":
         _disable_statusline()
         print("Status line reading surface disabled. The original or newer user status line is in place.")
@@ -754,12 +761,12 @@ def cmd_refresh(args):
 
 
 def _set_hud(enabled):
-    if enabled and tbstate.stream_count():
-        generation_dir = tbstate.stream_generation_dir()
-        if not generation_dir or not os.path.isfile(os.path.join(generation_dir, "0.hud")):
+    config = tbstate.update_config(lambda live: live.update({"hud": enabled}))
+    if enabled and tbstate.load_queue()["items"]:
+        if not tbstate.ensure_hud_shards():
             with tbstate.rebuilding_stream(include_hud=True):
                 pass
-    return tbstate.update_config(lambda live: live.update({"hud": enabled}))
+    return config
 
 
 def cmd_hud(args):
@@ -877,6 +884,17 @@ def _resolve_queue_item(query, rows=None):
     return matches[0]
 
 
+def _controls_hint():
+    """Prefer zero-model-turn controls when the bundled `tb` is already on PATH."""
+    import shutil
+    short_tb = shutil.which("tb")
+    bundled_tb = os.path.join(plugin_root(), "bin", "tb")
+    if short_tb and os.path.realpath(short_tb) == os.path.realpath(bundled_tb):
+        return "Next: !tb n · Back: !tb b"
+    return ("Next: /thinking-book:n · Back: /thinking-book:b · "
+            "Local controls: /book install-cli")
+
+
 def cmd_dashboard(args):
     """A compact control panel for a bare `/book`, without making the model improvise."""
     details = "--details" in args
@@ -886,18 +904,16 @@ def cmd_dashboard(args):
     queue_ids = tbstate.load_queue()["items"]
     indexed_ids = {entry["id"] for entry in entries}
     unavailable = [item_id for item_id in queue_ids if item_id not in indexed_ids]
-    if details or not active:
+    if details:
         print("thinking-book %s" % version())
     if not active:
         if unavailable:
-            print("\n%d queued item%s unavailable; run /book queue to inspect or remove %s."
-                  % (len(unavailable), " is" if len(unavailable) == 1 else "s are",
-                     "it" if len(unavailable) == 1 else "them"))
-            print("Help: /book help · Guided setup: /thinking-book:setup")
+            print("%d queued item%s unavailable."
+                  % (len(unavailable), " is" if len(unavailable) == 1 else "s are"))
+            print("Fix: /book queue · Help: /book help")
             return
-        print("\nNo book is queued.")
-        print("Start: /book add <title|url|file>")
-        print("Guided setup: /thinking-book:setup · Help: /book help")
+        print("No book yet.")
+        print("Start: /book <title|url|file> · Help: /book help")
         return
 
     meta = tbstate.item_meta(active["id"])
@@ -914,31 +930,20 @@ def cmd_dashboard(args):
     else:
         state = "reading"
     pace = _pace_label(config)
-    print("\n%s" % heading)
-    print("%s %d/%d (%d%%) · %s · %s" % (
+    library = " · book %d/%d" % (active["number"], len(entries)) if len(entries) > 1 else ""
+    print(heading)
+    print("%s %d/%d (%d%%)%s · %s · %s" % (
         tbstate.progress_bar(active["offset"], active["length"]),
-        active["offset"], active["length"], percent, pace, state))
-    if len(entries) > 1:
-        print("Library: book %d of %d" % (active["number"], len(entries)))
-    print("Current: %s" % (current_line() or "(blank)"))
-    import shlex
-    import shutil
-    short_tb = shutil.which("tb")
-    bundled_tb = os.path.join(plugin_root(), "bin", "tb")
-    if short_tb and os.path.realpath(short_tb) == os.path.realpath(bundled_tb):
-        controls = "Next: !tb n · Back: !tb b"
-    else:
-        tb_command = shlex.quote(bundled_tb)
-        controls = ("Next: !%s n · Back: !%s b · Shorter: /book install-cli"
-                    % (tb_command, tb_command))
+        active["offset"], active["length"], percent, library, pace, state))
+    print(current_line() or "(blank)")
+    controls = _controls_hint()
     if not (surfaces["statusline"] or surfaces["spinner"]):
         controls += " · Enable: /book on"
     elif config["paused"]:
         controls += " · Resume: /book resume"
     else:
         controls += " · Pause: /book pause"
-    print("\n%s" % controls)
-    print("Library: /book queue · Display: /book display · More: /book help")
+    print("%s · Queue: /book queue · Help: /book help" % controls)
     if details:
         print("Surfaces: statusline=%s spinner=%s hud=%s" % (
             "on" if surfaces["statusline"] else "off",
@@ -954,14 +959,14 @@ def cmd_dashboard(args):
 
 def _turn(steps):
     if not tbstate.stream_count():
-        print("Nothing queued -- try /book add <title|url|file>.")
+        print("Nothing queued — try /book <title|url|file>.")
         return
     before = tbstate.read_pos()
-    previous = tbstate.item_at(before)
+    rows = tbstate.load_index()
+    previous = tbstate.item_at(before, rows=rows)
     position = advance_by(steps)
-    sync_spinner()
-    line = current_line()
-    current = tbstate.item_at(position)
+    line = sync_spinner()
+    current = tbstate.item_at(position, rows=rows)
     if steps and position == before:
         title = _display_title(current[1], current[3]) if current else "the library"
         print("%s of %s. Use /book queue to switch books." %
@@ -969,7 +974,7 @@ def _turn(steps):
     elif previous and current and previous[1] != current[1]:
         print("📖 %s\n%s" % (_display_title(current[1], current[3]), line))
     else:
-        print(line or "Nothing queued -- try /book add <title|url|file>.")
+        print(line or "Nothing queued — try /book <title|url|file>.")
 
 
 def _integer_arg(args, usage, minimum=1, maximum=None):
@@ -1063,20 +1068,21 @@ def cmd_open(args):
     query = " ".join(args).strip()
     with tbstate.locked():
         rows = tbstate.load_index()
+        total = tbstate.stream_count()
         selected = _resolve_queue_item(query, rows=rows)
-        tbstate.capture_position()
+        tbstate.capture_position(rows=rows)
         item_id, title = selected["id"], selected["title"]
         offset = tbstate.load_bookmarks().get(item_id, 1)
-        position = tbstate.resolve_position(item_id, offset)
+        position = tbstate.resolve_position(item_id, offset, rows=rows, total=total)
         if position is None:
             raise SystemExit("%s is no longer queued; run /book queue and try again." % title)
         tbstate.write_pos(position)
         tbstate.write_last_advance()
-        resolved = tbstate.locate_position(position)
+        resolved = tbstate.locate_position(position, rows=rows, total=total)
         offset = resolved[1] if resolved else 1
         tbstate.save_bookmark(item_id, offset)
-    sync_spinner()
-    print("Opened %s at line %d: %s" % (title, offset, current_line() or "(blank)"))
+    line = sync_spinner()
+    print("Opened %s at line %d: %s" % (title, offset, line or "(blank)"))
 
 
 def cmd_mode(args):
@@ -1207,13 +1213,11 @@ def cmd_version(_args):
 
 
 def print_help():
-    print("Read something now: /book <title|url|file>")
-    print("Queue without switching: /book add <title|url|file>")
-    print("Read: /book status · /book pause|resume · /book next|back [line count]")
-    print("Pace: /book pace <wpm> · fixed seconds: /book dwell <seconds> · mode timer|turn|manual")
-    print("Display: /book display hud|line|spinner|off · guided setup: /thinking-book:setup")
-    print("Library: /book queue · /book open <number-or-title> · /book queue rm <book>")
-    print("More: /book feed · /book reader · /book install-cli · /book repair · /book version")
+    print("Read: /book <title|url|file> · next|back [n] · pause|resume · status")
+    print("Pace: pace <wpm> · mode timer|turn|manual · dwell <seconds>")
+    print("Display: display hud|line|spinner|off · surfaces: on|off")
+    print("Library: queue · open <number|title> · add <title|url|file>")
+    print("More: feed · reader · install-cli · repair · version")
 
 
 def cmd_help(_args):
@@ -1274,13 +1278,13 @@ def cmd_sync(args):
             or (config.get("words_per_minute") and not tbstate.stream_has_word_counts())):
         with tbstate.rebuilding_stream():
             pass
-    sync_spinner(config)
+    line = sync_spinner(config)
     if not config["paused"] and _feeds_due():
         try:
             _spawn_feed_refresh()
         except Exception:
             pass
-    _report(args, current_line() or "Nothing queued -- try /book add <title|url|file>.")
+    _report(args, line or "Nothing queued — try /book <title|url|file>.")
 
 
 def cmd_advance(args):
@@ -1292,8 +1296,8 @@ def cmd_advance(args):
     """
     config = tbstate.load_config()
     if config["paused"] or tbstate.stream_count() == 0:
-        sync_spinner(config)
-        _report(args, current_line() or "Nothing queued.")
+        line = sync_spinner(config)
+        _report(args, line or "Nothing queued.")
         return
 
     mode = config["mode"]
@@ -1308,8 +1312,8 @@ def cmd_advance(args):
         elif time.time() - last >= tbstate.timer_interval(
                 tbstate.stream_record(tbstate.read_pos())[0], config):
             advance_by(1)
-    sync_spinner(config)
-    _report(args, current_line() or "Nothing queued.")
+    line = sync_spinner(config)
+    _report(args, line or "Nothing queued.")
 
 
 def cmd_restore(args):

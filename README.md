@@ -25,11 +25,11 @@ configured automatically:
 /thinking-book:setup ~/Books/my-book.epub
 ```
 
-Run `/thinking-book:setup` without an argument to see the exact syntax. Setup asks no
-questions, offers no preset books, and never retries a failed download.
+Run `/thinking-book:setup` without an argument to resume, or to see the syntax when no
+book is queued. Setup asks no questions, offers no presets, and never retries a download.
 
-The first successful setup points to the optional one-time CLI installer. After that,
-starting another book can be entirely local:
+The first successful setup points to the optional one-time local controls. After that,
+books and page turns can avoid model turns entirely:
 
 ```sh
 tb ~/Books/next.epub             # separate terminal: zero model tokens or conversation context
@@ -82,15 +82,15 @@ Call me Ishmael.
 ```
 
 It is optional and off by default. Normal mode retains the original one-line display and
-one bounded lookup, and does not generate HUD shards. Enabling the HUD builds matching
-256-line metadata shards once; each display then performs one additional bounded lookup. It
-never starts Python or scans the book. Switch back with `/book display line`, use only the
-live spinner with `/book display spinner`, or restore the original setup with
+one bounded lookup, and does not generate HUD shards. Enabling the HUD adds matching
+256-line metadata shards without republishing the prose; each display then performs one
+additional bounded lookup. It never starts Python or scans the book. Switch back with
+`/book display line`, use only the live spinner with `/book display spinner`, or restore with
 `/book display off`.
 
 The HUD is display-only. The `/book` dashboard prints working in-app page controls. When
-`tb` is installed they are `!tb n` and `!tb b`; otherwise it prints the plugin's absolute
-command, so page turning works immediately even when the install path contains spaces.
+`tb` is installed they are `!tb n` and `!tb b`; otherwise it shows the namespaced controls
+and the one-time `/book install-cli` shortcut.
 
 ## Local reading without spending a turn
 
@@ -214,8 +214,9 @@ Settings files are watched, so the change lands without a restart.
 The status line is the livelier surface. Claude Code re-runs a `statusLine` command **once
 per assistant message**, so it can update several times inside a single turn. `statusline.sh`
 is the hot path: no Python, no JSON parsing, no full-file scans — Python pre-chunks
-immutable 256-line shards and publishes them through one atomic generation pointer. The
-shell reads one prose shard and, only when the HUD is enabled, one matching metadata shard.
+immutable 256-line prose shards and publishes them through one atomic generation pointer.
+Optional HUD metadata shards are added atomically beside them. The shell reads one prose
+shard and, only when the HUD is enabled, one matching metadata shard.
 Across 100 invocations on the development Mac at line 25,000 of 25,000, compact manual mode
 measured 7.12 ms median (8.82 ms p95); the 250 WPM timer measured 9.31 ms median
 (10.71 ms p95), and the graphical HUD measured 11.53 ms median (13.14 ms p95), against a

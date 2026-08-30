@@ -206,6 +206,20 @@ class HookTest(IsolatedStateCase):
         self.run_cli("advance", "--quiet", env={"CLAUDE_CODE_SESSION_ID": "session-b"})
         self.assertEqual(self.pos(), 2)
 
+    def test_invalid_or_oversized_session_ids_use_the_global_marker(self):
+        import thinking_book
+        self.seed_stream(["one"])
+        for session_id in ("abc\n", "x" * 65):
+            with self.subTest(session_id=session_id):
+                os.environ["CLAUDE_CODE_SESSION_ID"] = session_id
+                self.assertEqual(
+                    thinking_book.statusline_live_path(),
+                    self.tbstate.path("statusline.live.global"),
+                )
+                result = self.run_statusline(env={"CLAUDE_CODE_SESSION_ID": session_id})
+                self.assertEqual(result.returncode, 0)
+                self.assertTrue(os.path.exists(self.tbstate.path("statusline.live.global")))
+
     # ------------------------------------------------------------------- robustness
 
     def test_hooks_exit_zero_with_no_book_queued(self):
@@ -250,8 +264,8 @@ class HookTest(IsolatedStateCase):
         # Regression: a quoted "$ARGUMENTS" with nothing typed delivers one empty string.
         result = self.run_cli("")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("thinking-book", result.stdout)
-        self.assertIn("setup", result.stdout)
+        self.assertIn("No book yet", result.stdout)
+        self.assertIn("/book <title|url|file>", result.stdout)
         self.assertNotIn("unknown command", result.stderr)
 
     def test_setup_command_uses_native_questions_and_only_the_safe_cli(self):
@@ -263,24 +277,32 @@ class HookTest(IsolatedStateCase):
         self.assertIn("thinking_book.py", source)
         self.assertIn("title, URL, or file path", source)
         self.assertNotIn("settings.json", source)
+        self.assertIn("!`python3", source)
 
     def test_help_command_prints_task_oriented_help(self):
         result = self.run_cli("help")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Read something now", result.stdout)
+        self.assertIn("Read: /book <title|url|file>", result.stdout)
         self.assertNotIn("refresh-feeds", result.stdout)
         self.assertNotIn("All commands:", result.stdout)
+        self.assertNotIn("display on", result.stdout)
 
     def test_setup_is_one_short_backend_call_with_sensible_defaults(self):
         path = os.path.join(support.REPO, "commands", "setup.md")
         with open(path) as fh:
             source = fh.read()
-        self.assertIn("`start", source)
-        self.assertIn("run exactly one command", source)
-        self.assertIn("run no tools", source)
-        for forbidden in ("preflight", "preset", "retry", "summary", "dashboard"):
-            self.assertIn(forbidden, source)
-        self.assertLessEqual(len(source.split()), 120)
+        self.assertIn('thinking_book.py" start "$ARGUMENTS"', source)
+        for forbidden in ("preflight", "preset", "retry", "summary", "dashboard",
+                          "run exactly", "run no tools"):
+            self.assertNotIn(forbidden, source)
+        self.assertLessEqual(len(source.split()), 40)
+
+    def test_command_prompts_require_verbatim_output(self):
+        for name in ("book.md", "setup.md"):
+            with open(os.path.join(support.REPO, "commands", name)) as fh:
+                source = fh.read()
+            self.assertIn("verbatim", source)
+            self.assertNotIn("briefly", source)
 
     def test_manual_hook_does_not_rewrite_an_unchanged_spinner(self):
         self.seed_stream(["one"], mode="manual")

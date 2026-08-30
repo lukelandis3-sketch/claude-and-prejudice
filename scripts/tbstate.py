@@ -469,14 +469,9 @@ def _publish_stream_generation(lines, hud_rows, index_rows):
             pass
 
 
-def load_index():
-    """[(start_line, item_id, kind, title)] for every item in the stream."""
+def _parse_index(raw):
     rows = []
-    generation_dir = stream_generation_dir()
-    target = os.path.join(generation_dir, "index") if generation_dir else ""
-    if not target or not os.path.isfile(target):
-        target = path("stream.idx")
-    for line in _read(target, "").split("\n"):
+    for line in raw.split("\n"):
         if not line.strip():
             continue
         parts = line.split("\t")
@@ -489,10 +484,74 @@ def load_index():
     return rows
 
 
-def item_at(index):
+def ensure_hud_shards():
+    """Add missing HUD siblings to the live generation without republishing prose."""
+    with locked():
+        generation = stream_generation()
+        directory = stream_generation_dir(generation) if generation else ""
+        if not directory or not os.path.isdir(directory):
+            return False
+        raw_count = _read(os.path.join(directory, "count"), "").strip()
+        if not re.fullmatch(r"[0-9]{1,12}", raw_count):
+            return False
+        total = int(raw_count)
+        raw_index = _read(os.path.join(directory, "index"), "")
+        index_lines = [line for line in raw_index.split("\n") if line.strip()]
+        rows = _parse_index(raw_index)
+        if len(rows) != len(index_lines):
+            return False
+        if (total and not rows) or (rows and rows[0][0] != 1):
+            return False
+
+        text_shards = []
+        for name in os.listdir(directory):
+            match = re.fullmatch(r"([0-9]+)\.txt", name)
+            if match:
+                text_shards.append(int(match.group(1)))
+        expected_shards = (total + STREAM_SHARD_LINES - 1) // STREAM_SHARD_LINES
+        if (len(text_shards) != expected_shards
+                or (text_shards and (min(text_shards) != 0
+                                     or max(text_shards) != expected_shards - 1))):
+            return False
+        missing = [start for start in range(0, total, STREAM_SHARD_LINES)
+                   if not os.path.isfile(os.path.join(
+                       directory, "%d.hud" % (start // STREAM_SHARD_LINES)))]
+        if not missing:
+            return True
+
+        hud_rows = []
+        for offset, row in enumerate(rows):
+            end = rows[offset + 1][0] - 1 if offset + 1 < len(rows) else total
+            if row[0] < 1 or end < row[0] or end > total:
+                return False
+            length = end - row[0] + 1
+            hud_rows.extend(hud_line(row[1], row[3], line, length)
+                            for line in range(1, length + 1))
+        if len(hud_rows) != total:
+            return False
+
+        for start in missing:
+            target = os.path.join(directory, "%d.hud" % (start // STREAM_SHARD_LINES))
+            atomic_write(
+                target,
+                "\n".join(hud_rows[start:start + STREAM_SHARD_LINES]) + "\n",
+            )
+        return True
+
+
+def load_index():
+    """[(start_line, item_id, kind, title)] for every item in the stream."""
+    generation_dir = stream_generation_dir()
+    target = os.path.join(generation_dir, "index") if generation_dir else ""
+    if not target or not os.path.isfile(target):
+        target = path("stream.idx")
+    return _parse_index(_read(target, ""))
+
+
+def item_at(index, rows=None):
     """Which queued item does stream line `index` belong to?"""
     current = None
-    for row in load_index():
+    for row in (rows if rows is not None else load_index()):
         if row[0] <= index:
             current = row
         else:
@@ -554,9 +613,16 @@ def save_bookmark(item_id, offset):
     write_json(path("bookmarks.json"), bookmarks)
 
 
-def capture_position():
+def capture_position(rows=None):
     """Persist and return the active item's logical bookmark."""
-    logical = locate_position(read_pos())
+    position = read_pos()
+    rows = load_index() if rows is None else rows
+    current = item_at(position, rows=rows)
+    # Derive the relative offset from the index start rather than the cached stream
+    # count. A damaged count file should not move the reader during a repair rebuild;
+    # restore_position clamps a deliberately unbounded stored offset against the new
+    # complete stream.
+    logical = (current[1], max(1, position - current[0] + 1)) if current else None
     if logical:
         save_bookmark(*logical)
     return logical

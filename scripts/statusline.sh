@@ -23,6 +23,7 @@ TB_SESSION_ID=${CLAUDE_CODE_SESSION_ID:-global}
 case "$TB_SESSION_ID" in
     ''|*[!A-Za-z0-9_-]*) TB_SESSION_ID=global ;;
 esac
+[ "${#TB_SESSION_ID}" -gt 64 ] && TB_SESSION_ID=global
 TB_LIVE_MARKER="$TB_DIR/statusline.live.$TB_SESSION_ID"
 
 # Claude Code pipes session JSON on stdin. Retain it only when a wrapped status line
