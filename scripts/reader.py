@@ -56,14 +56,21 @@ def frame(line, title, position, total, width=80, mode=None):
 
 
 def read_key(timeout=POLL_SECONDS):
-    """One keypress, or None when the timeout expires so the caller can re-check state."""
+    """One keypress, or None when the timeout expires so the caller can re-check state.
+
+    Reads the raw descriptor rather than `sys.stdin.read(1)`: the text layer buffers, so a
+    one-byte read drained the whole arrow-key escape sequence off the fd and left the
+    caller holding a bare ESC -- which reads as "quit".
+    """
     if not select.select([sys.stdin], [], [], timeout)[0]:
         return None
-    key = sys.stdin.read(1)
-    # Arrow keys arrive as a three-byte escape sequence; take the rest if it is pending.
-    if key == "\x1b" and select.select([sys.stdin], [], [], 0.05)[0]:
-        key += sys.stdin.read(2)
-    return key
+    try:
+        data = os.read(sys.stdin.fileno(), 8)
+    except OSError:
+        return None
+    if not data:
+        return None
+    return data.decode("utf-8", errors="replace")
 
 
 def run(state, on_advance, on_back):

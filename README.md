@@ -68,7 +68,7 @@ tb reader
 ```
 
 Run it in a split and you get the one-keypress page turn that is impossible inside Claude
-Code itself: **space** advances, `b` goes back, `r` redraws, `q` quits. It shows the line and
+Code itself: **space** or `n` advances, `b` goes back, arrow keys work too, `r` redraws, `q` quits. It shows the line and
 your position, updates when something else moves the bookmark (timer mode, `!tb n`), and
 writes through to the same position file — so the spinner in the Claude pane follows along on
 its next turn. One bookmark, several windows.

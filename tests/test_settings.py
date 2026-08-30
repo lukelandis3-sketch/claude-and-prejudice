@@ -61,6 +61,28 @@ class SettingsTest(IsolatedStateCase):
         self.tbsettings.set_statusline("ours")
         self.assertEqual(set(self.tbsettings.diff_against_backup()), {"spinnerVerbs", "statusLine"})
 
+    def test_restores_a_users_own_spinner_verbs_rather_than_deleting_them(self):
+        # Someone may already have had custom verbs; /book off must not destroy them.
+        original = {"mode": "append", "verbs": ["Yarring", "Splicing"]}
+        self.write_settings({"spinnerVerbs": original})
+        self.tbsettings.set_spinner_line("Call me Ishmael.")
+        self.tbsettings.clear_spinner()
+        self.assertEqual(self.read_settings()["spinnerVerbs"], original)
+        self.assertEqual(self.tbsettings.diff_against_backup(), {})
+
+    def test_clear_removes_the_key_when_the_user_had_none(self):
+        self.write_settings({"model": "opus"})
+        self.tbsettings.set_spinner_line("A line.")
+        self.tbsettings.clear_spinner()
+        self.assertNotIn("spinnerVerbs", self.read_settings())
+
+    def test_padding_survives_a_later_statusline_write(self):
+        self.tbsettings.set_statusline("ours", padding=2)
+        self.tbsettings.set_statusline("ours", refresh_interval=10)
+        entry = self.read_settings()["statusLine"]
+        self.assertEqual(entry["padding"], 2)
+        self.assertEqual(entry["refreshInterval"], 10)
+
     def test_restores_wrapped_statusline_verbatim(self):
         original = {"type": "command", "command": "my-prompt --fancy", "padding": 1}
         self.write_settings({"statusLine": original})

@@ -70,6 +70,24 @@ def make_epub(path, encrypted=False):
     return path
 
 
+def make_epub_with_encoded_href(path):
+    """An EPUB whose spine href is percent-encoded and whose member name has a space.
+
+    Entirely legal per the OPF spec, and the shape that silently lost a chapter.
+    """
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("mimetype", "application/epub+zip")
+        archive.writestr("META-INF/container.xml", CONTAINER_XML)
+        archive.writestr(
+            "OEBPS/content.opf",
+            CONTENT_OPF.replace('href="ch1.xhtml"', 'href="ch%201.xhtml#start"'),
+        )
+        archive.writestr("OEBPS/nav.xhtml", NAV_XHTML)
+        archive.writestr("OEBPS/ch 1.xhtml", CHAPTER_ONE)
+        archive.writestr("OEBPS/ch2.xhtml", CHAPTER_TWO)
+    return path
+
+
 class IsolatedStateCase(unittest.TestCase):
     """Point CLAUDE_CONFIG_DIR at a scratch directory so no real settings are touched."""
 

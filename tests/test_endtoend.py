@@ -135,6 +135,27 @@ class RoundTripTest(IsolatedStateCase):
         with open(self.tbstate.path("wrapped.cmd")) as fh:
             self.assertEqual(fh.read().strip(), "my-own-prompt --fancy")
 
+    def test_pane_on_survives_a_string_statusline(self):
+        # is_our_statusline accepts a plain string, but the callers used to call .get()
+        # on it and raise AttributeError after config had already been saved.
+        with open(self.tbstate.settings_path(), "w") as fh:
+            json.dump({"statusLine": "my-own-prompt"}, fh, indent=2)
+        self.run_cli("load", self.book)
+
+        result = self.run_cli("pane", "on")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("AttributeError", result.stderr)
+        self.assertIn("statusline.sh", self.settings()["statusLine"]["command"])
+        with open(self.tbstate.path("wrapped.cmd")) as fh:
+            self.assertEqual(fh.read().strip(), "my-own-prompt")
+
+    def test_repair_survives_a_string_statusline(self):
+        with open(self.tbstate.settings_path(), "w") as fh:
+            json.dump({"statusLine": "my-own-prompt"}, fh, indent=2)
+        result = self.run_cli("repair")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("AttributeError", result.stderr)
+
     def test_refresh_interval_is_written_only_when_asked_for(self):
         self.run_cli("load", self.book)
         self.run_cli("pane", "on")

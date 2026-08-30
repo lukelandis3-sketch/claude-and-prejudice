@@ -32,6 +32,16 @@ class EpubTest(unittest.TestCase):
         # The nav document lists chapter names; prose should not be polluted by the TOC.
         self.assertEqual(text.count("Chapter One"), 1)
 
+    def test_percent_encoded_hrefs_and_fragments_resolve(self):
+        # Regression: "ch%201.xhtml" never matched the member "ch 1.xhtml", so the
+        # chapter vanished while the import still reported success.
+        encoded = support.make_epub_with_encoded_href(
+            os.path.join(self._tmp.name, "encoded.epub")
+        )
+        _meta, text = epub.load(encoded)
+        self.assertIn("Ishmael", text)
+        self.assertIn("driving off the spleen", text)
+
     def test_rejects_encrypted_epub_rather_than_stripping_drm(self):
         encrypted = support.make_epub(
             os.path.join(self._tmp.name, "drm.epub"), encrypted=True

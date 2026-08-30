@@ -76,8 +76,20 @@ def set_spinner_line(line):
 
 
 def clear_spinner():
+    """Put back whatever spinnerVerbs the user had before we first touched settings.
+
+    Someone may already have had their own custom verbs; deleting the key outright would
+    destroy them, which is not what "/book off restores every key we touched" promises.
+    """
+    original = None
+    if os.path.exists(backup_path()):
+        original = tbstate.read_json(backup_path(), {}).get(SPINNER_KEY)
+
     def mutate(settings):
-        settings.pop(SPINNER_KEY, None)
+        if original is not None:
+            settings[SPINNER_KEY] = original
+        else:
+            settings.pop(SPINNER_KEY, None)
 
     return update(mutate)
 
@@ -96,6 +108,11 @@ def set_statusline(command, padding=None, refresh_interval=None):
 
     def mutate(settings):
         entry = {"type": "command", "command": command}
+        # Carry forward padding the user set; replacing the entry wholesale would drop it
+        # on every `refresh` and on any second `pane on`.
+        existing = settings.get(STATUSLINE_KEY)
+        if padding is None and isinstance(existing, dict) and "padding" in existing:
+            entry["padding"] = existing["padding"]
         if padding is not None:
             entry["padding"] = padding
         if refresh_interval is not None:

@@ -2,6 +2,8 @@
 
 import unittest
 
+import sys
+
 import support  # noqa: F401  (path setup)
 import reader
 
@@ -22,6 +24,46 @@ class KeyMappingTest(unittest.TestCase):
     def test_unknown_keys_do_nothing(self):
         for key in ("z", "1", "", "\t"):
             self.assertIsNone(reader.action_for(key), repr(key))
+
+
+class ReadKeyTest(unittest.TestCase):
+    """Regression: a buffered one-byte read drained the escape sequence, so arrows quit."""
+
+    def setUp(self):
+        import os
+        import pty
+        import tty
+        self.master, slave = pty.openpty()
+        tty.setcbreak(slave)
+        self._saved_stdin = sys.stdin
+        sys.stdin = os.fdopen(slave, "r")
+
+    def tearDown(self):
+        import os
+        sys.stdin.close()
+        sys.stdin = self._saved_stdin
+        os.close(self.master)
+
+    def _send(self, raw):
+        import os
+        os.write(self.master, raw)
+        return reader.read_key(2.0)
+
+    def test_arrow_keys_arrive_whole_and_do_not_quit(self):
+        self.assertEqual(reader.action_for(self._send(b"\x1b[C")), "advance")
+        self.assertEqual(reader.action_for(self._send(b"\x1b[D")), "back")
+        self.assertEqual(reader.action_for(self._send(b"\x1b[B")), "advance")
+        self.assertEqual(reader.action_for(self._send(b"\x1b[A")), "back")
+
+    def test_plain_keys_still_work(self):
+        self.assertEqual(reader.action_for(self._send(b" ")), "advance")
+        self.assertEqual(reader.action_for(self._send(b"q")), "quit")
+
+    def test_a_bare_escape_still_quits(self):
+        self.assertEqual(reader.action_for(self._send(b"\x1b")), "quit")
+
+    def test_timeout_returns_none_so_the_caller_can_recheck_state(self):
+        self.assertIsNone(reader.read_key(0.05))
 
 
 class FrameTest(unittest.TestCase):

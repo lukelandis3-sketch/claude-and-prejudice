@@ -186,8 +186,14 @@ def cmd_feed(args):
             return
         data["feeds"].append({"url": url, "title": meta.get("title"), "last_checked": 0, "seen": []})
         save_feeds(data)
-        print("Subscribed to %s (%d entries available)." % (meta.get("title") or url, len(entries)))
-        refresh_feeds(force=True)
+        print("Subscribed to %s (%d entries available); fetching in the background."
+              % (meta.get("title") or url, len(entries)))
+        # Never fetch every subscription synchronously inside a slash command -- that is
+        # the foreground-network hazard cmd_sync deliberately avoids.
+        try:
+            _spawn_feed_refresh(force=True)
+        except Exception:
+            pass
     elif action == "rm":
         before = len(data["feeds"])
         data["feeds"] = [entry for entry in data["feeds"] if entry["url"] != url]
@@ -217,13 +223,16 @@ def refresh_feeds(force=False):
         except Exception:
             continue
         entry.setdefault("title", meta.get("title"))
-        seen = set(entry.get("seen") or [])
-        fresh = [item for item in items if item["link"] not in seen][:MAX_NEW_ITEMS_PER_FEED]
+        # Order matters: this list is truncated below, and slicing an unordered set kept
+        # an arbitrary 500 links rather than the most recent, so old articles came back.
+        seen = list(dict.fromkeys(entry.get("seen") or []))
+        seen_set = set(seen)
+        fresh = [item for item in items if item["link"] not in seen_set][:MAX_NEW_ITEMS_PER_FEED]
         for item in fresh:
             try:
                 article_meta, text = article.load(item["link"])
             except Exception:
-                seen.add(item["link"])
+                seen.append(item["link"])
                 continue
             article_meta["title"] = item.get("title") or article_meta.get("title")
             try:
@@ -231,13 +240,34 @@ def refresh_feeds(force=False):
                 added += 1
             except Exception:
                 pass
-            seen.add(item["link"])
-        entry["seen"] = list(seen)[-500:]
+            seen.append(item["link"])
+        entry["seen"] = seen[-500:]
     save_feeds(data)
     return added
 
 
 # ------------------------------------------------------------------------- surfaces
+
+def _path_candidates(command):
+    """Paths a shell command might be referring to.
+
+    Quoted segments come first: quoting is how a path containing a space survives a shell
+    command at all, and a whitespace-split token would cut it in half.
+    """
+    candidates = []
+    for match in re.finditer(r'"([^"]*)"|\'([^\']*)\'', command):
+        candidates.append(match.group(1) if match.group(1) is not None else match.group(2))
+    candidates.extend(command.split())
+    candidates.append(command)
+    return [c.strip().strip('"\'') for c in candidates if c and c.strip()]
+
+
+def as_statusline_entry(entry):
+    """Normalise a statusLine value to a dict, so callers can always use .get()."""
+    if isinstance(entry, str):
+        return {"type": "command", "command": entry}
+    return entry if isinstance(entry, dict) else None
+
 
 def is_our_statusline(entry):
     """Is this status line command one of ours, whatever path it was installed from?
@@ -256,8 +286,10 @@ def is_our_statusline(entry):
     if "thinking-book" in command or "thinking_book" in command:
         return True
     # Installed under some other directory name: check the script sits beside our CLI.
-    for token in re.findall(r'[^\s"\']*' + re.escape(SCRIPT_NAME), command):
-        if os.path.exists(os.path.join(os.path.dirname(token), "thinking_book.py")):
+    for candidate in _path_candidates(command):
+        if os.path.basename(candidate) != SCRIPT_NAME:
+            continue
+        if os.path.exists(os.path.join(os.path.dirname(candidate), "thinking_book.py")):
             return True
     return False
 
@@ -277,7 +309,7 @@ def cmd_pane(args):
     config = tbstate.load_config()
 
     if action == "on":
-        existing = tbsettings.current_statusline()
+        existing = as_statusline_entry(tbsettings.current_statusline())
         ours = statusline_command()
         if existing and not is_our_statusline(existing):
             # Preserve whatever the user already had; statusline.sh will run it too.
@@ -328,7 +360,7 @@ def cmd_repair(_args):
         tbstate.save_config(config)
         findings.append("cleared a stored status line that was thinking-book's own")
 
-    live = tbsettings.current_statusline()
+    live = as_statusline_entry(tbsettings.current_statusline())
     if live and is_our_statusline(live):
         expected = statusline_command()
         if live.get("command") != expected:
@@ -557,12 +589,15 @@ def _feeds_due():
     return False
 
 
-def _spawn_feed_refresh():
-    """Refresh feeds out of band -- SessionStart must not wait on the network."""
+def _spawn_feed_refresh(force=False):
+    """Refresh feeds out of band -- nothing interactive should wait on the network."""
     import subprocess
+    command = [sys.executable, os.path.abspath(__file__), "refresh-feeds"]
+    if force:
+        command.append("--force")
     with open(os.devnull, "wb") as devnull:
         subprocess.Popen(
-            [sys.executable, os.path.abspath(__file__), "refresh-feeds"],
+            command,
             stdout=devnull, stderr=devnull, stdin=devnull,
             start_new_session=True,
         )
@@ -575,7 +610,7 @@ def _report(args, message):
 
 
 def cmd_refresh_feeds(args):
-    added = refresh_feeds()
+    added = refresh_feeds(force="--force" in args)
     sync_spinner()
     _report(args, "Feeds refreshed; %d new item(s) queued." % added)
 
@@ -654,10 +689,12 @@ def _normalise_argv(argv):
     """
     if len(argv) == 1 and any(ch.isspace() for ch in argv[0]):
         try:
-            return shlex.split(argv[0])
+            argv = shlex.split(argv[0])
         except ValueError:
-            return argv[0].split()
-    return argv
+            argv = argv[0].split()
+    # With no arguments, a quoted "$ARGUMENTS" still delivers one empty string; passing it
+    # through turns a bare /book into `unknown command ''`.
+    return [argument for argument in argv if argument.strip()]
 
 
 def _looks_like_a_slash_command(argument):

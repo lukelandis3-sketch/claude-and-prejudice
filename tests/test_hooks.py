@@ -159,6 +159,13 @@ class HookTest(IsolatedStateCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no such file", result.stderr)
 
+    def test_bare_invocation_prints_usage_not_an_unknown_command(self):
+        # Regression: a quoted "$ARGUMENTS" with nothing typed delivers one empty string.
+        result = self.run_cli("")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Commands:", result.stdout)
+        self.assertNotIn("unknown command", result.stderr)
+
     def test_unknown_command_is_an_error_not_a_crash(self):
         result = self.run_cli("nonsense")
         self.assertEqual(result.returncode, 2)

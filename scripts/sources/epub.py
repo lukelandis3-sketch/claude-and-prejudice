@@ -6,6 +6,7 @@ circumvent DRM. Buy DRM-free, borrow highlights, or read public domain.
 
 import os
 import posixpath
+import urllib.parse
 import zipfile
 from xml.etree import ElementTree
 
@@ -98,6 +99,10 @@ def extract_text(path):
         base = posixpath.dirname(opf_name)
         texts = []
         for href in _spine_documents(opf_root):
+            # OPF hrefs are URL references: percent-encoded, and possibly with a fragment.
+            # Without decoding, "ch%201.xhtml" never matches the member "ch 1.xhtml" and
+            # the chapter is silently dropped from an otherwise successful import.
+            href = urllib.parse.unquote(href.split("#", 1)[0])
             member = posixpath.normpath(posixpath.join(base, href)) if base else href
             if member not in names:
                 continue
