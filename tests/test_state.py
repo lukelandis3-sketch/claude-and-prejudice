@@ -1,0 +1,86 @@
+import unittest
+
+from support import IsolatedStateCase
+
+
+class StreamTest(IsolatedStateCase):
+    def test_rebuild_concatenates_items_in_queue_order(self):
+        self.tbstate.save_item("a", {"title": "Book A", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "Book B", "kind": "article"}, ["b1"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.assertEqual(self.tbstate.rebuild_stream(), 3)
+        self.assertEqual(self.tbstate.stream_line(1), "a1")
+        self.assertEqual(self.tbstate.stream_line(3), "b1")
+
+    def test_count_cache_matches_stream(self):
+        self.seed_stream(["one", "two", "three"])
+        self.assertEqual(self.tbstate.stream_count(), 3)
+        with open(self.tbstate.path("count")) as fh:
+            self.assertEqual(fh.read().strip(), "3")
+
+    def test_stream_line_out_of_range_is_empty(self):
+        self.seed_stream(["only"])
+        self.assertEqual(self.tbstate.stream_line(0), "")
+        self.assertEqual(self.tbstate.stream_line(99), "")
+
+    def test_item_at_maps_position_to_its_item(self):
+        self.tbstate.save_item("a", {"title": "Book A", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "Book B", "kind": "article"}, ["b1"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        self.assertEqual(self.tbstate.item_at(1)[1], "a")
+        self.assertEqual(self.tbstate.item_at(2)[1], "a")
+        self.assertEqual(self.tbstate.item_at(3)[1], "b")
+
+    def test_empty_items_are_skipped_without_breaking_the_index(self):
+        self.tbstate.save_item("empty", {"title": "Nothing", "kind": "book"}, [])
+        self.tbstate.save_item("real", {"title": "Something", "kind": "book"}, ["x1"])
+        self.tbstate.save_queue({"items": ["empty", "real"]})
+        self.assertEqual(self.tbstate.rebuild_stream(), 1)
+        self.assertEqual(self.tbstate.item_at(1)[1], "real")
+
+
+class ConfigTest(IsolatedStateCase):
+    def test_defaults_applied_to_partial_config(self):
+        self.tbstate.write_json(self.tbstate.path("config.json"), {"mode": "manual"})
+        config = self.tbstate.load_config()
+        self.assertEqual(config["mode"], "manual")
+        self.assertEqual(config["dwell_seconds"], 8)
+        self.assertTrue(config["surfaces"]["spinner"])
+
+    def test_invalid_values_fall_back_to_defaults(self):
+        self.tbstate.write_json(
+            self.tbstate.path("config.json"), {"mode": "nonsense", "dwell_seconds": "abc"}
+        )
+        config = self.tbstate.load_config()
+        self.assertEqual(config["mode"], "timer")
+        self.assertEqual(config["dwell_seconds"], 8)
+
+    def test_corrupt_config_does_not_raise(self):
+        self.tbstate.atomic_write(self.tbstate.path("config.json"), "{ not json")
+        self.assertEqual(self.tbstate.load_config()["mode"], "timer")
+
+    def test_hot_env_quotes_awkward_values(self):
+        config = self.tbstate.load_config()
+        config["prefix"] = "it's $(rm -rf /) "
+        self.tbstate.save_config(config)
+        with open(self.tbstate.path("hot.env")) as fh:
+            contents = fh.read()
+        self.assertIn("TB_PREFIX='it'\\''s $(rm -rf /) '", contents)
+
+
+class PositionTest(IsolatedStateCase):
+    def test_position_defaults_to_one(self):
+        self.assertEqual(self.tbstate.read_pos(), 1)
+
+    def test_corrupt_position_file_reads_as_one(self):
+        self.tbstate.atomic_write(self.tbstate.path("pos"), "not-a-number\n")
+        self.assertEqual(self.tbstate.read_pos(), 1)
+
+    def test_position_never_goes_below_one(self):
+        self.tbstate.write_pos(-5)
+        self.assertEqual(self.tbstate.read_pos(), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

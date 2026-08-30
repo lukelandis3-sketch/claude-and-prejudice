@@ -1,0 +1,15 @@
+{
+  "name": "thinking-book-marketplace",
+  "owner": { "name": "lukelandis3-sketch" },
+  "metadata": {
+    "description": "A single-plugin marketplace hosting thinking-book.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "thinking-book",
+      "source": "./",
+      "description": "Replaces the Claude Code thinking text and status line with successive lines of the book you're reading."
+    }
+  ]
+}
