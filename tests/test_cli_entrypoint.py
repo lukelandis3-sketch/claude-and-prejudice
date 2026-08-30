@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import tempfile
 import unittest
 
 import support
@@ -49,6 +50,23 @@ class EntryPointTest(IsolatedStateCase):
         result = self.run_tb("version", binary=link)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(support.REPO, result.stdout)
+
+    def test_symlink_cycle_fails_quickly_instead_of_hanging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = os.path.join(directory, "first")
+            second = os.path.join(directory, "second")
+            os.symlink("second", first)
+            os.symlink("first", second)
+            script = os.path.join(support.REPO, "bin", "tb")
+            # Source the script so the shell can supply a cyclic $0; executing the cycle
+            # directly is rejected by the kernel before tb gets a chance to diagnose it.
+            result = subprocess.run(
+                ["sh", "-c", '. "$1"', first, script],
+                capture_output=True, text=True, timeout=5,
+                env=dict(os.environ, CLAUDE_CONFIG_DIR=self.config_dir),
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("symlink", result.stderr.lower())
 
 
 class InstallCliTest(IsolatedStateCase):

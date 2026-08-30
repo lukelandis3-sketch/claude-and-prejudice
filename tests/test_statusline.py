@@ -266,6 +266,38 @@ class StatusLineTest(IsolatedStateCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(result.stdout.splitlines(), ["my own status line", "one"])
 
+    def test_huge_numeric_state_is_silent_and_nonfatal(self):
+        self.seed_stream(["one"], mode="timer", wpm=None)
+        huge = "9" * 10000 + "\n"
+        for target in (
+            self.tbstate.path("pos"),
+            self.tbstate.path("last"),
+            os.path.join(self.tbstate.stream_generation_dir(), "count"),
+        ):
+            self.tbstate.atomic_write(target, huge)
+        result = self.run_statusline()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+
+    def test_huge_generation_name_is_silent_and_nonfatal(self):
+        self.seed_stream(["one"], mode="manual")
+        self.tbstate.atomic_write(self.tbstate.path("stream.gen"), "a" * 10000 + "\n")
+        result = self.run_statusline()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
+    def test_corrupt_dwell_uses_a_safe_default(self):
+        self.seed_stream(["one", "two"], mode="timer", wpm=None)
+        hot = self.tbstate.path("hot.env")
+        with open(hot) as fh:
+            contents = fh.read()
+        self.tbstate.atomic_write(
+            hot, contents.replace("TB_DWELL='8'", "TB_DWELL='999999999999999999999'"))
+        result = self.run_statusline()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+
     def test_corrupt_zero_padded_shard_word_count_is_not_fatal(self):
         self.seed_stream(["one"], mode="timer", wpm=250)
         shard = os.path.join(self.tbstate.stream_generation_dir(), "0.txt")
@@ -295,6 +327,7 @@ class StatusLineTest(IsolatedStateCase):
         self.assertNotIn('cat "$TB_DIR/pos"', source)
         self.assertNotIn("tr -d", source)
         self.assertNotIn("for _word in $LINE", source)
+        self.assertNotIn("cat >/dev/null", source)
 
     def test_empty_stream_prints_nothing(self):
         self.tbstate.save_queue({"items": []})

@@ -96,6 +96,7 @@ class IsolatedStateCase(unittest.TestCase):
         self.config_dir = self._tmp.name
         self._previous = os.environ.get("CLAUDE_CONFIG_DIR")
         os.environ["CLAUDE_CONFIG_DIR"] = self.config_dir
+        self._previous_session = os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
 
         import importlib
         import tbstate
@@ -111,6 +112,9 @@ class IsolatedStateCase(unittest.TestCase):
             os.environ.pop("CLAUDE_CONFIG_DIR", None)
         else:
             os.environ["CLAUDE_CONFIG_DIR"] = self._previous
+        os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        if self._previous_session is not None:
+            os.environ["CLAUDE_CODE_SESSION_ID"] = self._previous_session
         self._tmp.cleanup()
 
     def run_cli(self, *args, **kwargs):

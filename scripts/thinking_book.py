@@ -21,6 +21,7 @@ import tbstate
 
 SCRIPT_NAME = "statusline.sh"
 FEED_REFRESH_SECONDS = 3600
+LIVE_MARKER_MAX_AGE = 30 * 24 * 60 * 60
 MAX_NEW_ITEMS_PER_FEED = 3
 HOOK_COMMANDS = {"sync", "advance", "restore", "refresh-feeds"}
 PATH_COMMANDS = {"add", "load", "libby", "clippings", "readwise"}
@@ -62,6 +63,24 @@ def statusline_live_path():
     return tbstate.path("statusline.live." + session_id)
 
 
+def prune_statusline_markers(now=None):
+    """Remove abandoned liveness markers without disturbing recent sessions."""
+    cutoff = (time.time() if now is None else now) - LIVE_MARKER_MAX_AGE
+    try:
+        entries = os.scandir(tbstate.home())
+    except OSError:
+        return
+    with entries:
+        for entry in entries:
+            if not entry.name.startswith("statusline.live."):
+                continue
+            try:
+                if entry.stat(follow_symlinks=False).st_mtime < cutoff:
+                    os.unlink(entry.path)
+            except OSError:
+                pass
+
+
 def current_line():
     return tbstate.stream_line(tbstate.read_pos())
 
@@ -100,10 +119,8 @@ def _install_prepared(prepared):
     """Save any number of already-chunked items with one lock and one stream publish."""
     if not prepared:
         return []
-    with tbstate.locked():
-        logical = tbstate.capture_position()
+    with tbstate.rebuilding_stream():
         queue = tbstate.load_queue()
-        old_items = list(queue["items"])
         queue_changed = False
         for item_id, meta, fragments in prepared:
             tbstate.save_item(item_id, meta, fragments)
@@ -112,8 +129,6 @@ def _install_prepared(prepared):
                 queue_changed = True
         if queue_changed:
             tbstate.save_queue(queue)
-        tbstate.rebuild_stream()
-        tbstate.restore_position(logical, old_items=old_items)
     return [item_id for item_id, _meta, _fragments in prepared]
 
 
@@ -627,11 +642,8 @@ def _set_hud(enabled):
     if enabled and tbstate.stream_count():
         generation_dir = tbstate.stream_generation_dir()
         if not generation_dir or not os.path.isfile(os.path.join(generation_dir, "0.hud")):
-            with tbstate.locked():
-                logical = tbstate.capture_position()
-                old_items = list(tbstate.load_queue()["items"])
-                tbstate.rebuild_stream(include_hud=True)
-                tbstate.restore_position(logical, old_items=old_items)
+            with tbstate.rebuilding_stream(include_hud=True):
+                pass
     return tbstate.update_config(lambda live: live.update({"hud": enabled}))
 
 
@@ -896,9 +908,8 @@ def cmd_queue(args):
     removed_title = None
     removed_count = 0
     removed_active = False
-    with tbstate.locked():
+    with tbstate.rebuilding_stream() as (logical, _old_items):
         queue = tbstate.load_queue()
-        old_items = list(queue["items"])
         if action == "clear":
             removed_count = len(queue["items"])
             selected = None
@@ -911,15 +922,12 @@ def cmd_queue(args):
             else:
                 selected = _resolve_queue_item(query)
             removed_title = selected["title"]
-        logical = tbstate.capture_position()
         if action == "clear":
             queue["items"] = []
         else:
             removed_active = bool(logical and logical[0] == selected["id"])
             queue["items"] = [i for i in queue["items"] if i != selected["id"]]
         tbstate.save_queue(queue)
-        tbstate.rebuild_stream()
-        tbstate.restore_position(logical, old_items=old_items)
     sync_spinner()
     if action == "rm":
         now = tbstate.item_at(tbstate.read_pos())
@@ -967,11 +975,8 @@ def cmd_pace(args):
     wpm = _integer_arg(
         args, "usage: /book pace <30-1000 words-per-minute>", 30, 1000)
     if tbstate.stream_count() and not tbstate.stream_has_word_counts():
-        with tbstate.locked():
-            logical = tbstate.capture_position()
-            old_items = list(tbstate.load_queue()["items"])
-            tbstate.rebuild_stream()
-            tbstate.restore_position(logical, old_items=old_items)
+        with tbstate.rebuilding_stream():
+            pass
     config = tbstate.update_config(lambda live: live.update({"words_per_minute": wpm}))
     message = "Timer pace: %d words per minute." % wpm
     if config["mode"] != "timer":
@@ -980,7 +985,7 @@ def cmd_pace(args):
 
 
 def cmd_dwell(args):
-    seconds = _integer_arg(args, "usage: /book dwell <seconds>", 0)
+    seconds = _integer_arg(args, "usage: /book dwell <0-86400 seconds>", 0, 86400)
     config = tbstate.update_config(lambda live: live.update({
         "dwell_seconds": max(1, seconds), "words_per_minute": None,
     }))
@@ -1143,14 +1148,16 @@ def cmd_sync(args):
         os.unlink(statusline_live_path())
     except OSError:
         pass
+    prune_statusline_markers()
     config = tbstate.load_config()
     tbstate.write_hot_env(config)
     generation_dir = tbstate.stream_generation_dir()
     if (tbstate.stream_count() == 0 or not tbstate.stream_generation()
             or not generation_dir or not os.path.isdir(generation_dir)
+            or not tbstate.stream_has_index()
             or (config.get("words_per_minute") and not tbstate.stream_has_word_counts())):
-        with tbstate.locked():
-            tbstate.rebuild_stream()
+        with tbstate.rebuilding_stream():
+            pass
     sync_spinner(config)
     if not config["paused"] and _feeds_due():
         try:
@@ -1191,7 +1198,7 @@ def cmd_advance(args):
 
 def cmd_restore(args):
     """SessionEnd: do not leave a stale line in settings for non-plugin sessions."""
-    tbsettings.clear_spinner()
+    tbsettings.clear_spinner(session_only=True)
     _report(args, "Spinner override removed.")
 
 

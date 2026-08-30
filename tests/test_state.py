@@ -45,11 +45,42 @@ class StreamTest(IsolatedStateCase):
         self.assertEqual(self.tbstate.stream_record(1), (3, "one two three"))
         self.assertEqual(self.tbstate.stream_line(1), "one two three")
 
-    def test_count_cache_matches_stream(self):
+    def test_generation_is_self_contained_and_legacy_stream_is_not_duplicated(self):
         self.seed_stream(["one", "two", "three"])
         self.assertEqual(self.tbstate.stream_count(), 3)
-        with open(self.tbstate.path("count")) as fh:
+        with open(os.path.join(self.tbstate.stream_generation_dir(), "count")) as fh:
             self.assertEqual(fh.read().strip(), "3")
+        self.assertTrue(os.path.exists(os.path.join(
+            self.tbstate.stream_generation_dir(), "index")))
+        for legacy in ("count", "stream.txt", "stream.idx"):
+            self.assertFalse(os.path.exists(self.tbstate.path(legacy)))
+
+    def test_legacy_stream_remains_readable_until_first_rebuild(self):
+        self.tbstate.atomic_write(self.tbstate.path("stream.txt"), "old one\nold two\n")
+        self.tbstate.atomic_write(self.tbstate.path("count"), "2\n")
+        self.tbstate.atomic_write(
+            self.tbstate.path("stream.idx"), "1\told\tbook\tOld Book\n")
+        self.assertEqual(self.tbstate.stream_count(), 2)
+        self.assertEqual(self.tbstate.stream_line(2), "old two")
+        self.assertEqual(self.tbstate.load_index(), [(1, "old", "book", "Old Book")])
+
+    def test_v06_generation_uses_legacy_index_until_sync_migrates_it(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        generation_index = os.path.join(self.tbstate.stream_generation_dir(), "index")
+        with open(generation_index) as fh:
+            contents = fh.read()
+        self.tbstate.atomic_write(self.tbstate.path("stream.idx"), contents)
+        os.unlink(generation_index)
+        self.assertEqual(self.tbstate.item_at(2)[1], "test-item")
+
+    def test_two_publications_retain_two_self_contained_generations(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        self.tbstate.rebuild_stream()
+        root = self.tbstate.path("stream-generations")
+        generations = [os.path.join(root, name) for name in os.listdir(root)]
+        self.assertEqual(len(generations), 2)
+        for generation in generations:
+            self.assertTrue(os.path.isfile(os.path.join(generation, "index")))
 
     def test_stream_line_out_of_range_is_empty(self):
         self.seed_stream(["only"])
@@ -119,6 +150,12 @@ class ConfigTest(IsolatedStateCase):
         config = self.tbstate.load_config()
         self.assertEqual(config["mode"], "timer")
         self.assertEqual(config["dwell_seconds"], 8)
+
+    def test_excessive_dwell_is_clamped(self):
+        self.tbstate.write_json(
+            self.tbstate.path("config.json"), {"dwell_seconds": 999999999}
+        )
+        self.assertEqual(self.tbstate.load_config()["dwell_seconds"], 86400)
 
     def test_corrupt_config_does_not_raise(self):
         self.tbstate.atomic_write(self.tbstate.path("config.json"), "{ not json")

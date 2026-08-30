@@ -53,6 +53,19 @@ class HookTest(IsolatedStateCase):
         self.run_cli("sync", "--quiet")
         self.assertTrue(self.tbstate.stream_has_word_counts())
 
+    def test_sync_moves_a_legacy_root_index_into_the_generation(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        generation_index = os.path.join(self.tbstate.stream_generation_dir(), "index")
+        with open(generation_index) as fh:
+            legacy_index = fh.read()
+        self.tbstate.atomic_write(self.tbstate.path("stream.idx"), legacy_index)
+        os.unlink(generation_index)
+
+        self.run_cli("sync", "--quiet")
+
+        self.assertTrue(self.tbstate.stream_has_index())
+        self.assertFalse(os.path.exists(self.tbstate.path("stream.idx")))
+
     # -------------------------------------------------------------------- Stop: turn
 
     def test_turn_mode_advances_exactly_one_line_per_stop(self):
@@ -171,6 +184,18 @@ class HookTest(IsolatedStateCase):
         self.tbstate.atomic_write(self.tbstate.path("statusline.live.global"), "")
         self.run_cli("sync", "--quiet")
         self.assertFalse(os.path.exists(self.tbstate.path("statusline.live.global")))
+
+    def test_sync_removes_only_stale_statusline_liveness_markers(self):
+        self.seed_stream(["one"])
+        stale = self.tbstate.path("statusline.live.stale")
+        recent = self.tbstate.path("statusline.live.recent")
+        self.tbstate.atomic_write(stale, "")
+        self.tbstate.atomic_write(recent, "")
+        old = time.time() - 31 * 24 * 60 * 60
+        os.utime(stale, (old, old))
+        self.run_cli("sync", "--quiet")
+        self.assertFalse(os.path.exists(stale))
+        self.assertTrue(os.path.exists(recent))
 
     def test_statusline_liveness_is_scoped_by_session_id_when_available(self):
         self.seed_stream(["one", "two"], mode="timer", dwell=600, statusline=True)

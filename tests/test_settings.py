@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 from support import IsolatedStateCase, SCRIPTS
 
@@ -136,6 +137,14 @@ class SettingsTest(IsolatedStateCase):
             self.assertEqual(fh.read(), contents)
         self.assertEqual(after.st_ino, before.st_ino)
 
+    def test_identical_user_spinner_is_not_claimed_or_removed(self):
+        custom = {"mode": "replace", "verbs": ["Hold this line."]}
+        self.write_settings({"spinnerVerbs": custom, "theme": "dark"})
+        self.tbsettings.set_spinner_line("Hold this line.")
+        self.tbsettings.clear_spinner()
+        self.assertEqual(self.read_settings()["spinnerVerbs"], custom)
+        self.assertFalse(os.path.exists(self.tbsettings.backup_path()))
+
     def test_legacy_backup_is_used_per_key_not_per_first_v04_write(self):
         original_status = {"type": "command", "command": "npx ccstatusline"}
         self.write_settings({
@@ -179,6 +188,28 @@ class SettingsTest(IsolatedStateCase):
         self.write_settings(settings)
         self.tbsettings.clear_spinner()
         self.assertEqual(self.read_settings()["spinnerVerbs"], custom)
+
+        # The preserved edit becomes the baseline for the next enable/disable cycle.
+        self.tbsettings.set_spinner_line("Our next line.")
+        self.tbsettings.clear_spinner()
+        self.assertEqual(self.read_settings()["spinnerVerbs"], custom)
+
+    def test_one_session_ending_cannot_clear_another_sessions_spinner(self):
+        original = {"mode": "append", "verbs": ["Pondering"]}
+        self.write_settings({"spinnerVerbs": original})
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "session-a"}):
+            self.tbsettings.set_spinner_line("Session A line")
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "session-b"}):
+            self.tbsettings.set_spinner_line("Session B line")
+
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "session-a"}):
+            self.tbsettings.clear_spinner(session_only=True)
+        self.assertEqual(
+            self.read_settings()["spinnerVerbs"]["verbs"], ["Session B line"])
+
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "session-b"}):
+            self.tbsettings.clear_spinner(session_only=True)
+        self.assertEqual(self.read_settings()["spinnerVerbs"], original)
 
     def test_restore_preserves_statusline_changed_after_our_last_write(self):
         original = {"type": "command", "command": "before"}

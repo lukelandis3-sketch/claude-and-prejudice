@@ -201,12 +201,14 @@ is the hot path: no Python, no JSON parsing, no full-file scans — Python pre-c
 immutable 256-line shards and publishes them through one atomic generation pointer. The
 shell reads one prose shard and, only when the HUD is enabled, one matching metadata shard.
 Across 100 invocations on the development Mac at line 25,000 of 25,000, compact manual mode
-measured 8.85 ms median (10.24 ms p95); the graphical HUD measured 10.94 ms median
-(12.39 ms p95), against a 5 s timeout.
+measured 7.12 ms median (8.82 ms p95); the 250 WPM timer measured 9.31 ms median
+(10.71 ms p95), and the graphical HUD measured 11.53 ms median (13.14 ms p95), against a
+5 s timeout.
 
 State lives in `~/.claude/thinking-book/`. JSON files are the human-readable record;
-flat one-value files (`pos`, `last`, `count`, `hot.env`) and immutable stream shards keep
-the hot path to shell builtins plus one bounded lookup.
+flat one-value files (`pos`, `last`, `hot.env`) and self-contained immutable stream
+generations keep the hot path to shell builtins plus one bounded lookup. A 25,000-fragment
+stream rebuild measured 34 ms; the book is not duplicated into a second full-stream cache.
 
 ## Honest limitations
 

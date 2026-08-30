@@ -245,6 +245,11 @@ class RoundTripTest(IsolatedStateCase):
             self.assertEqual(result.returncode, 1)
             self.assertIn("usage: /book pace", result.stderr)
 
+    def test_excessive_dwell_has_a_stable_usage_error(self):
+        result = self.run_cli("dwell", "9" * 10000)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("usage: /book dwell", result.stderr)
+
     def test_manual_turn_reports_book_changes_and_stream_boundaries(self):
         self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1"])
         self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1"])

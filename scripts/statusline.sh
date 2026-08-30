@@ -33,7 +33,7 @@ if [ -s "$TB_DIR/wrapped.cmd" ]; then
     HAS_WRAPPED=1
     STDIN_JSON=$(cat 2>/dev/null || true)
 else
-    cat >/dev/null 2>&1 || true
+    while IFS= read -r _tb_stdin; do :; done
 fi
 
 emit_wrapped() {
@@ -70,6 +70,14 @@ case "$TB_WPM" in
         fi
         ;;
 esac
+case "$TB_DWELL" in
+    ''|0*|*[!0-9]*) TB_DWELL=8 ;;
+    *)
+        if [ "${#TB_DWELL}" -gt 5 ] || [ "$TB_DWELL" -gt 86400 ]; then
+            TB_DWELL=8
+        fi
+        ;;
+esac
 
 # Presence means this surface has actually run in the current Claude Code session. The
 # SessionStart hook removes it. A statusLine settings entry alone is not proof of life:
@@ -89,6 +97,7 @@ read_int() {
     case "$value" in
         ''|*[!0-9]*) value=$3 ;;
     esac
+    [ "${#value}" -gt 12 ] && value=$3
     # `value` is digits or a trusted numeric default, so this assignment cannot inject
     # shell syntax. Avoiding command substitution here removes one fork per state value.
     eval "$destination=\$value"
@@ -101,6 +110,7 @@ IFS= read -r GEN 2>/dev/null < "$TB_DIR/stream.gen" || GEN=''
 case "$GEN" in
     ''|*[!0-9a-f-]*) GEN='' ;;
 esac
+[ "${#GEN}" -gt 64 ] && GEN=''
 if [ -n "$GEN" ]; then
     STREAM_DIR="$TB_DIR/stream-generations/$GEN"
     read_int COUNT "$STREAM_DIR/count" 0

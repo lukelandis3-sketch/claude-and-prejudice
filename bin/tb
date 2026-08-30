@@ -8,7 +8,13 @@
 set -u
 
 target="$0"
+hops=0
 while [ -L "$target" ]; do
+    hops=$((hops + 1))
+    if [ "$hops" -gt 32 ]; then
+        echo "tb: too many symlink hops while resolving the entry point" >&2
+        exit 1
+    fi
     link=$(readlink "$target") || break
     case "$link" in
         /*) target="$link" ;;

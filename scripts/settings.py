@@ -8,6 +8,7 @@ the user put there themselves.
 
 import json
 import os
+import re
 import time
 
 import tbstate
@@ -15,6 +16,7 @@ import tbstate
 SPINNER_KEY = "spinnerVerbs"
 STATUSLINE_KEY = "statusLine"
 _MISSING = object()
+_WRITTEN_RECORD_VERSION = 1
 
 
 class SettingsError(ValueError):
@@ -183,15 +185,41 @@ def _original(key, fallback=_MISSING):
     return fallback
 
 
+def _session_id():
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID") or "global"
+    return session_id if re.fullmatch(r"[A-Za-z0-9_-]+", session_id) else "global"
+
+
+def _written_record(key):
+    written = tbstate.read_json(written_path(), {})
+    record = written.get(key, _MISSING) if isinstance(written, dict) else _MISSING
+    if (isinstance(record, dict)
+            and record.get("record_version") == _WRITTEN_RECORD_VERSION
+            and "value" in record):
+        return record.get("value"), record.get("owner")
+    return record, None
+
+
 def _record_written(key, value):
     written = tbstate.read_json(written_path(), {})
-    written[key] = value
+    written = written if isinstance(written, dict) else {}
+    record = {
+        "record_version": _WRITTEN_RECORD_VERSION,
+        "owner": _session_id(),
+        "value": value,
+    }
+    if written.get(key, _MISSING) == record:
+        return
+    written[key] = record
     tbstate.write_json(written_path(), written)
 
 
 def _last_written(key):
-    written = tbstate.read_json(written_path(), {})
-    return written.get(key, _MISSING) if isinstance(written, dict) else _MISSING
+    return _written_record(key)[0]
+
+
+def _last_writer(key):
+    return _written_record(key)[1]
 
 
 def _owns_key(key):
@@ -214,9 +242,15 @@ def update(mutator, touched=(), record_key=None, retire=()):
         settings = read_settings()
         before = json.loads(json.dumps(settings))
         mutator(settings)
+        retire_keys = retire() if callable(retire) else retire
         if settings == before:
-            if retire:
-                _retire(retire)
+            # A second session may claim an unchanged value. Recording that owner keeps
+            # the first session's SessionEnd from clearing the active session's spinner.
+            if (record_key is not None and record_key in settings
+                    and _owns_key(record_key)):
+                _record_written(record_key, settings[record_key])
+            if retire_keys:
+                _retire(retire_keys)
             return settings, False
         with open(tbstate.settings_path(), "rb") as fh:
             raw = fh.read()
@@ -226,8 +260,8 @@ def update(mutator, touched=(), record_key=None, retire=()):
         tbstate.write_json(tbstate.settings_path(), settings)
         if record_key is not None:
             _record_written(record_key, settings[record_key])
-        if retire:
-            _retire(retire)
+        if retire_keys:
+            _retire(retire_keys)
         return settings, True
 
 
@@ -250,28 +284,37 @@ def set_spinner_line(line):
     return settings
 
 
-def clear_spinner():
+def clear_spinner(session_only=False):
     """Put back whatever spinnerVerbs the user had before we first touched settings.
 
     Someone may already have had their own custom verbs; deleting the key outright would
     destroy them, which is not what "/book off restores every key we touched" promises.
     """
-    original = _original(SPINNER_KEY)
-    last_written = _last_written(SPINNER_KEY)
-    owned = _owns_key(SPINNER_KEY)
+    outcome = {"retire": False}
 
     def mutate(settings):
+        original = _original(SPINNER_KEY)
+        last_written = _last_written(SPINNER_KEY)
+        owned = _owns_key(SPINNER_KEY)
         live = settings.get(SPINNER_KEY, _MISSING)
         if not owned:
             return
+        writer = _last_writer(SPINNER_KEY)
+        if session_only and writer is not None and writer != _session_id():
+            return
         if live is _MISSING or (last_written is not _MISSING and live != last_written):
+            # A user edit is now the baseline for the next activation. Retire our stale
+            # ownership without touching the live value.
+            outcome["retire"] = True
             return
         if original is not _MISSING:
             settings[SPINNER_KEY] = original
         else:
             settings.pop(SPINNER_KEY, None)
+        outcome["retire"] = True
 
-    settings, _changed = update(mutate, retire=(SPINNER_KEY,))
+    settings, _changed = update(
+        mutate, retire=lambda: (SPINNER_KEY,) if outcome["retire"] else ())
     return settings
 
 
@@ -342,22 +385,27 @@ def install_statusline(command, is_ours, auto=False, refresh_interval=None):
 def restore_statusline(original):
     """Put back whatever the user had before we wrapped it (or remove ours)."""
 
-    saved = _original(STATUSLINE_KEY, fallback=original if original is not None else _MISSING)
-    last_written = _last_written(STATUSLINE_KEY)
-    owned = _owns_key(STATUSLINE_KEY) or original is not None
+    outcome = {"retire": False}
 
     def mutate(settings):
+        saved = _original(
+            STATUSLINE_KEY, fallback=original if original is not None else _MISSING)
+        last_written = _last_written(STATUSLINE_KEY)
+        owned = _owns_key(STATUSLINE_KEY) or original is not None
         if not owned:
             return
         live = settings.get(STATUSLINE_KEY, _MISSING)
         if last_written is not _MISSING and live != last_written:
+            outcome["retire"] = True
             return
         if saved is not _MISSING:
             settings[STATUSLINE_KEY] = saved
         else:
             settings.pop(STATUSLINE_KEY, None)
+        outcome["retire"] = True
 
-    settings, _changed = update(mutate, retire=(STATUSLINE_KEY,))
+    settings, _changed = update(
+        mutate, retire=lambda: (STATUSLINE_KEY,) if outcome["retire"] else ())
     return settings
 
 

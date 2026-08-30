@@ -14,9 +14,9 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
-import shutil
 from contextlib import contextmanager
 
 DEFAULT_CONFIG = {
@@ -156,7 +156,8 @@ def load_config():
     if merged.get("mode") not in VALID_MODES:
         merged["mode"] = DEFAULT_CONFIG["mode"]
     try:
-        merged["dwell_seconds"] = max(1, int(merged.get("dwell_seconds", 8)))
+        merged["dwell_seconds"] = min(
+            86400, max(1, int(merged.get("dwell_seconds", 8))))
     except (TypeError, ValueError):
         merged["dwell_seconds"] = DEFAULT_CONFIG["dwell_seconds"]
     if legacy_fixed:
@@ -266,6 +267,11 @@ def stream_has_word_counts(generation=None):
                 == STREAM_FORMAT)
 
 
+def stream_has_index(generation=None):
+    directory = stream_generation_dir(generation)
+    return bool(directory and os.path.isfile(os.path.join(directory, "index")))
+
+
 def _decode_stream_record(record):
     prefix, separator, prose = record.partition("\t")
     if separator and prefix.isdigit():
@@ -275,6 +281,11 @@ def _decode_stream_record(record):
 
 def stream_count():
     """Line count of the reading stream, from the cache written by rebuild_stream."""
+    generation_dir = stream_generation_dir()
+    raw = _read(os.path.join(generation_dir, "count"), "").strip() if generation_dir else ""
+    if raw.isdigit():
+        return int(raw)
+    # Migration fallback for streams created before generation directories.
     raw = _read(path("count"), "").strip()
     if raw.isdigit():
         return int(raw)
@@ -402,15 +413,18 @@ def rebuild_stream(include_hud=None):
             hud_rows.extend(hud_line(item_id, title, offset, len(lines))
                             for offset in range(1, len(lines) + 1))
         line_no += len(lines)
-    atomic_write(stream_path(), ("\n".join(chunks) + "\n") if chunks else "")
-    atomic_write(path("stream.idx"), ("\n".join(index_rows) + "\n") if index_rows else "")
-    _publish_stream_generation(chunks, hud_rows)
-    # Cached for Python callers. Publish the internally consistent shell generation first.
-    atomic_write(path("count"), "%d\n" % len(chunks))
+    _publish_stream_generation(chunks, hud_rows, index_rows)
+    # These pre-generation caches duplicate the complete book. Keep read fallbacks above
+    # for upgrades, but retire them after a successful self-contained publication.
+    for legacy in (stream_path(), path("stream.idx"), path("count")):
+        try:
+            os.unlink(legacy)
+        except OSError:
+            pass
     return len(chunks)
 
 
-def _publish_stream_generation(lines, hud_rows):
+def _publish_stream_generation(lines, hud_rows, index_rows):
     """Publish immutable bounded-size lookup shards through one atomic pointer."""
     root = path("stream-generations")
     os.makedirs(root, exist_ok=True)
@@ -418,6 +432,10 @@ def _publish_stream_generation(lines, hud_rows):
     target = os.path.join(root, generation)
     os.makedirs(target)
     atomic_write(os.path.join(target, "format"), STREAM_FORMAT + "\n")
+    atomic_write(
+        os.path.join(target, "index"),
+        ("\n".join(index_rows) + "\n") if index_rows else "",
+    )
     for start in range(0, len(lines), STREAM_SHARD_LINES):
         shard = lines[start:start + STREAM_SHARD_LINES]
         records = ["%d\t%s" % (min(1000, max(1, len(line.split()))), line)
@@ -454,7 +472,11 @@ def _publish_stream_generation(lines, hud_rows):
 def load_index():
     """[(start_line, item_id, kind, title)] for every item in the stream."""
     rows = []
-    for line in _read(path("stream.idx"), "").split("\n"):
+    generation_dir = stream_generation_dir()
+    target = os.path.join(generation_dir, "index") if generation_dir else ""
+    if not target or not os.path.isfile(target):
+        target = path("stream.idx")
+    for line in _read(target, "").split("\n"):
         if not line.strip():
             continue
         parts = line.split("\t")
@@ -562,3 +584,14 @@ def restore_position(logical, old_items=None):
     if current:
         save_bookmark(*current)
     return position
+
+
+@contextmanager
+def rebuilding_stream(include_hud=None):
+    """Lock, snapshot the logical bookmark, then rebuild and restore it safely."""
+    with locked():
+        logical = capture_position()
+        old_items = list(load_queue()["items"])
+        yield logical, old_items
+        rebuild_stream(include_hud=include_hud)
+        restore_position(logical, old_items=old_items)
