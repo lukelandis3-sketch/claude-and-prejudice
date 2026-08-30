@@ -173,6 +173,28 @@ class HookTest(IsolatedStateCase):
         self.assertIn("git pull", result.stderr)
         self.assertIn("repair", result.stderr)  # the real command is listed
 
+    def test_arguments_arriving_as_one_blob_are_split(self):
+        # Slash commands pass "$ARGUMENTS" as a single quoted argument.
+        self.seed_stream(["one", "two", "three"], mode="manual")
+        result = self.run_cli("next 2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "three")
+
+    def test_a_pasted_second_slash_command_is_ignored_not_executed(self):
+        # Regression: unquoted $ARGUMENTS let a pasted newline reach the shell, which
+        # tried to run "/thinking-book:book" as a program.
+        self.seed_stream(["one", "two"], mode="manual")
+        result = self.run_cli("next\n/thinking-book:book pane on")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("second slash command", result.stderr)
+        self.assertEqual(result.stdout.strip(), "two")
+
+    def test_a_real_path_argument_is_not_mistaken_for_a_slash_command(self):
+        result = self.run_cli("load", "/nonexistent/book.epub")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no such file", result.stderr)
+        self.assertNotIn("second slash command", result.stderr)
+
     def test_version_reports_the_manifest_version_and_root(self):
         result = self.run_cli("version")
         self.assertEqual(result.returncode, 0, result.stderr)

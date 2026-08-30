@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import sys
 import time
 
@@ -592,7 +593,32 @@ COMMANDS = {
 }
 
 
+def _normalise_argv(argv):
+    """Slash commands hand us one quoted blob; a shell hands us real argv.
+
+    The quoting matters: an unquoted $ARGUMENTS let a pasted newline reach the shell,
+    which then tried to execute the next line as a program.
+    """
+    if len(argv) == 1 and any(ch.isspace() for ch in argv[0]):
+        try:
+            return shlex.split(argv[0])
+        except ValueError:
+            return argv[0].split()
+    return argv
+
+
+def _looks_like_a_slash_command(argument):
+    return argument.startswith("/") and ":" in argument and not os.path.exists(argument)
+
+
 def main(argv):
+    argv = _normalise_argv(argv)
+    stray = [a for a in argv[1:] if _looks_like_a_slash_command(a)]
+    if stray:
+        print("ignoring what looks like a second slash command (%s) -- send one command "
+              "per message." % stray[0], file=sys.stderr)
+        argv = [argv[0]] + [a for a in argv[1:] if not _looks_like_a_slash_command(a)]
+
     if not argv:
         print(__doc__.strip())
         print("\nCommands: %s" % ", ".join(sorted(COMMANDS)))

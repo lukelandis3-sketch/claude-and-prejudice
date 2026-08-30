@@ -4,7 +4,7 @@ argument-hint: load <file> | gutenberg <title> | read <url> | libby <export.json
 allowed-tools: Bash(python3:*)
 ---
 
-!`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/thinking_book.py" $ARGUMENTS`
+!`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/thinking_book.py" "$ARGUMENTS"`
 
 Report the output above to the user as-is. Keep it to a line or two; do not re-run the
 command, and do not explain what thinking-book is unless they asked.
