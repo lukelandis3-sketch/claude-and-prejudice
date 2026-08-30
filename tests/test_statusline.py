@@ -92,6 +92,48 @@ class StatusLineTest(IsolatedStateCase):
         self.tbstate.save_config(config)
         self.assertEqual(self.run_statusline().stdout.strip(), "book: one")
 
+    def test_optional_hud_adds_precomputed_book_progress_above_the_line(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        config = self.tbstate.load_config()
+        config["hud"] = True
+        self.tbstate.save_config(config)
+
+        lines = self.run_statusline().stdout.strip().split("\n")
+        self.assertEqual(lines, [
+            "📖 Test Item · █████░░░░░ 1/2 (50%) · manual",
+            "one",
+        ])
+
+    def test_hud_marks_paused_timer_mode(self):
+        self.seed_stream(["one"], mode="timer", dwell=12, paused=True)
+        config = self.tbstate.load_config()
+        config["hud"] = True
+        self.tbstate.save_config(config)
+        first = self.run_statusline().stdout.splitlines()[0]
+        self.assertIn("timer 12s", first)
+        self.assertIn("paused", first)
+
+    def test_hud_missing_from_an_old_generation_falls_back_to_the_book_line(self):
+        self.seed_stream(["one"], mode="manual")
+        config = self.tbstate.load_config()
+        config["hud"] = True
+        self.tbstate.save_config(config)
+        os.unlink(os.path.join(self.tbstate.stream_generation_dir(), "0.hud"))
+        self.assertEqual(self.run_statusline().stdout.strip(), "one")
+
+    def test_hud_metadata_stays_aligned_across_shard_boundaries(self):
+        lines = ["line-%d" % n for n in range(1, 259)]
+        self.seed_stream(lines, mode="manual")
+        config = self.tbstate.load_config()
+        config["hud"] = True
+        self.tbstate.save_config(config)
+        for position in (256, 257):
+            with self.subTest(position=position):
+                self.tbstate.write_pos(position)
+                output = self.run_statusline().stdout.splitlines()
+                self.assertIn("%d/258" % position, output[0])
+                self.assertEqual(output[1], "line-%d" % position)
+
     # ------------------------------------------------------------- wrapping
 
     def _wrap(self, command):
@@ -102,6 +144,17 @@ class StatusLineTest(IsolatedStateCase):
         self._wrap("echo 'my own status line'")
         lines = self.run_statusline().stdout.strip().split("\n")
         self.assertEqual(lines, ["my own status line", "Call me Ishmael."])
+
+    def test_hud_follows_a_wrapped_status_line_without_replacing_it(self):
+        self.seed_stream(["one"], mode="manual")
+        config = self.tbstate.load_config()
+        config["hud"] = True
+        self.tbstate.save_config(config)
+        self._wrap("echo 'my own status line'")
+        lines = self.run_statusline().stdout.strip().split("\n")
+        self.assertEqual(lines[0], "my own status line")
+        self.assertTrue(lines[1].startswith("📖 Test Item"))
+        self.assertEqual(lines[2], "one")
 
     def test_wrapped_status_line_receives_the_session_json_on_stdin(self):
         self.seed_stream(["a line"], mode="manual")

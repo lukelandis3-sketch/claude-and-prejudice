@@ -17,7 +17,13 @@ puts the same line in your status line, where it can turn pages during a turn.
 /plugin install thinking-book
 ```
 
-Then pick something to read:
+For guided setup inside Claude Code, use the native picker:
+
+```
+/thinking-book:setup
+```
+
+Or pick something directly:
 
 ```
 /book gutenberg moby dick
@@ -36,6 +42,8 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 |---|---|
 | `/thinking-book:n` | Turn the page — advance one line |
 | `/thinking-book:b` | Back one line |
+| `/thinking-book:setup` | Guided source, pace, mode, and display picker |
+| `/book` | Compact reading dashboard and controls |
 | `/book status` | Title, author, progress in this book, current line |
 | `/book queue` | A numbered library with each book's bookmark |
 | `/book open <number-or-title>` | Switch books; each one keeps its own bookmark |
@@ -45,9 +53,26 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 | `/book pause` / `/book resume` | Freeze on a line, or carry on |
 | `/book on` / `/book off` | Enable both reading surfaces, or restore the originals |
 | `/book pane on\|off` | Attach or detach the status line surface |
+| `/book hud on\|off` | Add or remove the graphical progress row |
 | `/book repair` | Undo a self-wrapped status line (see below) |
 | `/book version` | Which version is running, and from which directory |
 | `/book refresh <secs\|off>` | Set `statusLine.refreshInterval` where your version supports it |
+
+### Graphical reading HUD
+
+`/book hud on` adds a precomputed progress row above the prose:
+
+```
+📖 Moby-Dick · ████░░░░░░ 124/310 (40%) · timer 8s
+Call me Ishmael.
+```
+
+It is optional and off by default. Normal mode retains the original one-line display and
+one bounded lookup. HUD mode performs one additional lookup in a matching 256-line metadata
+shard; it never starts Python or scans the book. Turn it off at any time with `/book hud off`.
+
+The HUD is display-only. Claude Code does not expose plugin buttons or arbitrary-command
+keybindings, so the in-app, no-model-turn controls remain `!tb n` and `!tb b`.
 
 ## Turning pages without spending a turn
 
@@ -169,9 +194,10 @@ The status line is the livelier surface. Claude Code re-runs a `statusLine` comm
 per assistant message**, so it updates several times inside a single turn. `statusline.sh`
 is the hot path: no Python, no JSON parsing, no full-file scans — Python pre-chunks
 immutable 256-line shards and publishes them through one atomic generation pointer. The
-shell reads at most one shard. Across repeated 100-invocation runs on the development Mac,
-line 25,000 of 25,000 measured roughly 9–11 ms median in manual mode and 12–14 ms in timer
-mode, against a 5 s timeout.
+shell reads one prose shard and, only when the HUD is enabled, one matching metadata shard.
+Across 100 invocations on the development Mac at line 25,000 of 25,000, compact manual mode
+measured 9.70 ms median (10.39 ms p95); the graphical HUD measured 12.46 ms median
+(14.01 ms p95), against a 5 s timeout.
 
 State lives in `~/.claude/thinking-book/`. JSON files are the human-readable record;
 flat one-value files (`pos`, `last`, `count`, `hot.env`) and immutable stream shards keep

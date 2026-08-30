@@ -54,6 +54,7 @@ TB_DWELL=8
 TB_PAUSED=0
 TB_STATUSLINE=1
 TB_PREFIX=''
+TB_HUD=0
 # shellcheck disable=SC1090
 . "$TB_DIR/hot.env" 2>/dev/null || true
 
@@ -118,10 +119,22 @@ if [ "$TB_STATUSLINE" = "1" ] && [ "$TB_PAUSED" = "0" ] && [ "$TB_MODE" = "timer
 fi
 
 LINE=''
+HUD=''
 if [ "$TB_STATUSLINE" = "1" ] && [ -n "$STREAM_DIR" ] && [ "$POS" -le "$COUNT" ]; then
     SHARD=$(((POS - 1) / 256))
     ROW=$(((POS - 1) % 256 + 1))
     LINE=$(sed -n "${ROW}p" "$STREAM_DIR/$SHARD.txt" 2>/dev/null) || LINE=''
+    if [ "$TB_HUD" = "1" ]; then
+        HUD=$(sed -n "${ROW}p" "$STREAM_DIR/$SHARD.hud" 2>/dev/null) || HUD=''
+        if [ -n "$HUD" ]; then
+            if [ "$TB_MODE" = "timer" ]; then
+                HUD="$HUD · timer ${TB_DWELL}s"
+            else
+                HUD="$HUD · $TB_MODE"
+            fi
+            [ "$TB_PAUSED" = "1" ] && HUD="$HUD · paused"
+        fi
+    fi
 fi
 
 WRAPPED_OUT=''
@@ -129,11 +142,13 @@ if [ "$HAS_WRAPPED" = "1" ]; then
     WRAPPED_OUT=$(emit_wrapped)
 fi
 
-if [ -n "$WRAPPED_OUT" ] && [ -n "$LINE" ]; then
-    printf '%s\n%s%s\n' "$WRAPPED_OUT" "$TB_PREFIX" "$LINE"
-elif [ -n "$WRAPPED_OUT" ]; then
+if [ -n "$WRAPPED_OUT" ]; then
     printf '%s\n' "$WRAPPED_OUT"
-elif [ -n "$LINE" ]; then
+fi
+if [ -n "$HUD" ]; then
+    printf '%s\n' "$HUD"
+fi
+if [ -n "$LINE" ]; then
     printf '%s%s\n' "$TB_PREFIX" "$LINE"
 fi
 

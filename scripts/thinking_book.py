@@ -533,6 +533,25 @@ def cmd_refresh(args):
     print(message)
 
 
+def cmd_hud(args):
+    if not args or args[0] not in ("on", "off"):
+        raise SystemExit("usage: /book hud on|off")
+    enabled = args[0] == "on"
+    if enabled and tbstate.stream_count():
+        generation_dir = tbstate.stream_generation_dir()
+        if not generation_dir or not os.path.isfile(os.path.join(generation_dir, "0.hud")):
+            with tbstate.locked():
+                tbstate.rebuild_stream()
+    config = tbstate.update_config(lambda live: live.update({"hud": enabled}))
+    if enabled:
+        message = "Graphical reading HUD enabled. It will appear above the book line."
+        if not config["surfaces"]["statusline"]:
+            message += " The status-line surface is off; run /book pane on to show it."
+        print(message)
+    else:
+        print("Graphical reading HUD disabled. The compact book line remains.")
+
+
 # -------------------------------------------------------------------------- reading
 
 def _display_title(item_id, title):
@@ -588,6 +607,36 @@ def _resolve_queue_item(query, rows=None):
                             for entry in matches)
         raise SystemExit("%r is ambiguous: %s" % (query, choices))
     return matches[0]
+
+
+def cmd_dashboard(_args):
+    """A compact control panel for a bare `/book`, without making the model improvise."""
+    config = tbstate.load_config()
+    entries = _queue_entries()
+    active = next((entry for entry in entries if entry["active"]), None)
+    print("thinking-book %s" % version())
+    if not active:
+        print("\nNo book is queued.")
+        print("Start: /book gutenberg <title> · /book load <file.epub>")
+        print("Guided setup: /thinking-book:setup")
+        return
+
+    meta = tbstate.item_meta(active["id"])
+    author = meta.get("author") if isinstance(meta, dict) else None
+    heading = "📖 %s%s" % (active["title"], " — %s" % author if author else "")
+    percent = (active["offset"] * 100) // max(1, active["length"])
+    state = "paused" if config["paused"] else "reading"
+    pace = "timer %ss" % config["dwell_seconds"] if config["mode"] == "timer" else config["mode"]
+    print("\n%s" % heading)
+    print("%s %d/%d (%d%%) · %s · %s" % (
+        tbstate.progress_bar(active["offset"], active["length"]),
+        active["offset"], active["length"], percent, pace, state))
+    if len(entries) > 1:
+        print("Library: book %d of %d" % (active["number"], len(entries)))
+    print("Current: %s" % (current_line() or "(blank)"))
+    print("\nNext: !tb n · Back: !tb b · Pause: /book pause")
+    print("Switch: /book queue · Display: /book hud %s · Setup: /thinking-book:setup" %
+          ("off" if config.get("hud") else "on"))
 
 
 def cmd_next(args):
@@ -842,6 +891,7 @@ def cmd_version(_args):
 def print_help():
     print("Read something now: /book gutenberg <title> or /book load <file.epub>")
     print("Then: /book status · /book queue · /book open <number-or-title> · /book pause")
+    print("Display: /book hud on|off · guided setup: /thinking-book:setup")
     print("Library: /book queue rm <number-or-title> · /book queue clear")
     print("Sources: read <url> · clippings <file> · readwise <export> · libby <export> · feed")
     print("All commands: %s" % ", ".join(sorted(COMMANDS)))
@@ -951,7 +1001,8 @@ COMMANDS = {
     "feed": cmd_feed, "queue": cmd_queue, "open": cmd_open, "status": cmd_status, "mode": cmd_mode,
     "dwell": cmd_dwell, "pause": cmd_pause, "resume": cmd_resume, "pane": cmd_pane,
     "on": cmd_on, "off": cmd_off, "next": cmd_next, "back": cmd_back, "line": cmd_line,
-    "repair": cmd_repair, "refresh": cmd_refresh, "version": cmd_version, "help": cmd_help,
+    "repair": cmd_repair, "refresh": cmd_refresh, "hud": cmd_hud,
+    "version": cmd_version, "help": cmd_help,
     "reader": cmd_reader, "install-cli": cmd_install_cli,
     "sync": cmd_sync, "advance": cmd_advance, "restore": cmd_restore,
     "refresh-feeds": cmd_refresh_feeds,
@@ -1006,7 +1057,7 @@ def main(argv):
         argv = argv[:keep] + [a for a in argv[keep:] if not _looks_like_a_slash_command(a)]
 
     if not argv:
-        print_help()
+        cmd_dashboard([])
         return 0
 
     name, args = argv[0], argv[1:]

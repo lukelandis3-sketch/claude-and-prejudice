@@ -104,6 +104,28 @@ class RoundTripTest(IsolatedStateCase):
         self.assertIn("A. Fixture", status.stdout)
         self.assertIn("Position: line 1 of", status.stdout)
 
+    def test_bare_dashboard_shows_current_book_progress_and_controls(self):
+        self.run_cli("load", self.book)
+        dashboard = self.run_cli("")
+        self.assertEqual(dashboard.returncode, 0, dashboard.stderr)
+        self.assertIn("📖 The Test Voyage", dashboard.stdout)
+        self.assertIn("1/", dashboard.stdout)
+        self.assertIn("!tb n", dashboard.stdout)
+        self.assertIn("/thinking-book:setup", dashboard.stdout)
+
+    def test_hud_command_enables_and_disables_the_graphical_status(self):
+        self.run_cli("load", self.book)
+        enabled = self.run_cli("hud", "on")
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        self.assertTrue(self.tbstate.load_config()["hud"])
+        self.assertIn("Graphical reading HUD enabled", enabled.stdout)
+        self.assertTrue(os.path.exists(os.path.join(
+            self.tbstate.stream_generation_dir(), "0.hud")))
+
+        disabled = self.run_cli("hud", "off")
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        self.assertFalse(self.tbstate.load_config()["hud"])
+
     def test_status_reports_progress_in_the_current_book_not_the_whole_library(self):
         self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1", "a2"])
         self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1", "b2", "b3"])

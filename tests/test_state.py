@@ -120,6 +120,20 @@ class ConfigTest(IsolatedStateCase):
             contents = fh.read()
         self.assertIn("TB_PREFIX='it'\\''s $(rm -rf /) '", contents)
 
+    def test_hud_defaults_off_and_is_mirrored_to_the_hot_cache(self):
+        config = self.tbstate.load_config()
+        self.assertFalse(config["hud"])
+        config["hud"] = True
+        self.tbstate.save_config(config)
+        with open(self.tbstate.path("hot.env")) as fh:
+            self.assertIn("TB_HUD=1", fh.read())
+
+    def test_non_boolean_hud_config_falls_back_to_off(self):
+        for bad in ("off", 1, ["on"], None):
+            with self.subTest(bad=bad):
+                self.tbstate.write_json(self.tbstate.path("config.json"), {"hud": bad})
+                self.assertFalse(self.tbstate.load_config()["hud"])
+
     def test_identical_config_update_does_not_rewrite_config_or_hot_cache(self):
         self.tbstate.save_config(self.tbstate.load_config())
         before = (

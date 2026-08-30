@@ -203,13 +203,21 @@ class HookTest(IsolatedStateCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no such file", result.stderr)
 
-    def test_bare_invocation_prints_usage_not_an_unknown_command(self):
+    def test_bare_invocation_prints_the_dashboard_not_an_unknown_command(self):
         # Regression: a quoted "$ARGUMENTS" with nothing typed delivers one empty string.
         result = self.run_cli("")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("All commands:", result.stdout)
-        self.assertIn("Read something now", result.stdout)
+        self.assertIn("thinking-book", result.stdout)
+        self.assertIn("setup", result.stdout)
         self.assertNotIn("unknown command", result.stderr)
+
+    def test_setup_command_uses_native_questions_and_only_the_safe_cli(self):
+        path = os.path.join(support.REPO, "commands", "setup.md")
+        with open(path) as fh:
+            source = fh.read()
+        self.assertIn("AskUserQuestion", source)
+        self.assertIn("thinking_book.py", source)
+        self.assertNotIn("settings.json", source)
 
     def test_help_command_prints_task_oriented_help(self):
         result = self.run_cli("help")

@@ -27,6 +27,7 @@ DEFAULT_CONFIG = {
     "wrapped_statusline": None,  # the user's own statusLine command, if we wrapped one
     "statusline_refresh_interval": None,  # written only where the CLI version supports it
     "prefix": "",
+    "hud": False,
 }
 
 VALID_MODES = ("timer", "turn", "manual")
@@ -160,6 +161,8 @@ def load_config():
         "statusline": bool(surfaces.get("statusline", True)),
         "spinner": bool(surfaces.get("spinner", True)),
     }
+    hud = merged.get("hud")
+    merged["hud"] = hud if isinstance(hud, bool) else DEFAULT_CONFIG["hud"]
     return merged
 
 
@@ -180,6 +183,7 @@ def write_hot_env(config):
         "TB_PAUSED=%s" % ("1" if config["paused"] else "0"),
         "TB_STATUSLINE=%s" % ("1" if config["surfaces"]["statusline"] else "0"),
         "TB_PREFIX=%s" % _shell_quote(config.get("prefix") or ""),
+        "TB_HUD=%s" % ("1" if config.get("hud") else "0"),
     ]
     atomic_write(path("hot.env"), "\n".join(lines) + "\n")
 
@@ -312,6 +316,26 @@ def save_item(item_id, meta, fragments):
     write_json(path("library", item_id + ".json"), meta)
 
 
+def progress_bar(offset, total, width=10):
+    """A fixed-width reading bar safe for both Python output and precomputed HUD rows."""
+    total = max(1, int(total))
+    offset = max(1, min(int(offset), total))
+    filled = max(1, min(width, (offset * width) // total))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _hud_title(item_id, title, limit=38):
+    title = re.sub(r"[\x00-\x1f\x7f]+", " ", str(title or ""))
+    title = " ".join(title.split()) or item_id
+    return title if len(title) <= limit else title[:limit - 1].rstrip() + "…"
+
+
+def hud_line(item_id, title, offset, total):
+    percent = (max(1, min(offset, total)) * 100) // max(1, total)
+    return "📖 %s · %s %d/%d (%d%%)" % (
+        _hud_title(item_id, title), progress_bar(offset, total), offset, total, percent)
+
+
 def rebuild_stream():
     """Flatten every queued item into one stream file plus an index of item offsets.
 
@@ -319,27 +343,30 @@ def rebuild_stream():
     """
     ensure_home()
     queue = load_queue()
-    chunks, index_rows, line_no = [], [], 1
+    chunks, hud_rows, index_rows, line_no = [], [], [], 1
     for item_id in queue["items"]:
         raw = _read(item_fragments_path(item_id), "")
         lines = [ln for ln in raw.split("\n") if ln.strip()]
         if not lines:
             continue
         meta = item_meta(item_id)
-        title = " ".join(str(meta.get("title") or "").split()) or item_id
+        meta = meta if isinstance(meta, dict) else {}
+        title = _hud_title(item_id, meta.get("title"), limit=10_000)
         kind = meta.get("kind", "text")
         index_rows.append("%d\t%s\t%s\t%s" % (line_no, item_id, kind, title))
         chunks.extend(lines)
+        hud_rows.extend(hud_line(item_id, title, offset, len(lines))
+                        for offset in range(1, len(lines) + 1))
         line_no += len(lines)
     atomic_write(stream_path(), ("\n".join(chunks) + "\n") if chunks else "")
     atomic_write(path("stream.idx"), ("\n".join(index_rows) + "\n") if index_rows else "")
-    _publish_stream_generation(chunks)
+    _publish_stream_generation(chunks, hud_rows)
     # Cached for Python callers. Publish the internally consistent shell generation first.
     atomic_write(path("count"), "%d\n" % len(chunks))
     return len(chunks)
 
 
-def _publish_stream_generation(lines):
+def _publish_stream_generation(lines, hud_rows):
     """Publish immutable bounded-size lookup shards through one atomic pointer."""
     root = path("stream-generations")
     os.makedirs(root, exist_ok=True)
@@ -351,6 +378,10 @@ def _publish_stream_generation(lines):
         atomic_write(
             os.path.join(target, "%d.txt" % (start // STREAM_SHARD_LINES)),
             "\n".join(shard) + "\n",
+        )
+        atomic_write(
+            os.path.join(target, "%d.hud" % (start // STREAM_SHARD_LINES)),
+            "\n".join(hud_rows[start:start + STREAM_SHARD_LINES]) + "\n",
         )
     atomic_write(os.path.join(target, "count"), "%d\n" % len(lines))
     atomic_write(path("stream.gen"), generation + "\n")
