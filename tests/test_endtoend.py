@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 import unittest
 
 import support
@@ -219,6 +220,69 @@ class RoundTripTest(IsolatedStateCase):
         self.run_cli("load", self.book)
         self.assertEqual(self.tbstate.stream_count(), first_total)
         self.assertEqual(len(self.tbstate.load_queue()["items"]), 1)
+
+    def test_removing_an_earlier_item_preserves_current_fragment(self):
+        self.tbstate.save_item("a", {"title": "Book A", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "Book B", "kind": "book"}, ["b1", "b2"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        self.tbstate.write_pos(4)
+
+        result = self.run_cli("queue", "rm", "a")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "b2")
+
+    def test_removing_current_item_opens_the_next_item(self):
+        for item in ("a", "b", "c"):
+            self.tbstate.save_item(item, {"title": item.upper(), "kind": "book"}, [item + "1"])
+        self.tbstate.save_queue({"items": ["a", "b", "c"]})
+        self.tbstate.rebuild_stream()
+        self.tbstate.write_pos(2)
+        self.run_cli("queue", "rm", "b")
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "c1")
+
+    def test_reimport_preserves_position_in_a_later_item(self):
+        first = os.path.join(self.config_dir, "first.txt")
+        second = os.path.join(self.config_dir, "second.txt")
+        with open(first, "w") as fh:
+            fh.write("First one. First two. First three.")
+        with open(second, "w") as fh:
+            fh.write("Second one. Second two. Second three.")
+        self.run_cli("load", first)
+        self.run_cli("load", second)
+        second_start = self.tbstate.load_index()[1][0]
+        self.tbstate.write_pos(second_start + 1)
+        expected = self.tbstate.stream_line(self.tbstate.read_pos())
+
+        with open(first, "w") as fh:
+            fh.write("Short now.")
+        self.run_cli("load", first)
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), expected)
+
+    def test_open_preserves_a_bookmark_for_each_item(self):
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1", "a2", "a3"])
+        self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1", "b2", "b3"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        self.tbstate.write_pos(2)
+
+        self.assertIn("b1", self.run_cli("open", "Beta").stdout)
+        self.run_cli("next")
+        self.assertIn("a2", self.run_cli("open", "Alpha").stdout)
+        reopened = self.run_cli("open", "Beta")
+        self.assertIn("b2", reopened.stdout)
+        self.assertLess(abs(self.tbstate.read_last_advance() - time.time()), 3)
+
+    def test_open_reports_ambiguous_titles(self):
+        self.tbstate.save_item("a", {"title": "The Sea", "kind": "book"}, ["a1"])
+        self.tbstate.save_item("b", {"title": "Beyond the Sea", "kind": "book"}, ["b1"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        result = self.run_cli("open", "Sea")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("ambiguous", result.stderr)
+        self.assertIn("a", result.stderr)
+        self.assertIn("b", result.stderr)
 
 
 if __name__ == "__main__":

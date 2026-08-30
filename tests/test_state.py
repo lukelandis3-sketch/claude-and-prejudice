@@ -47,6 +47,15 @@ class StreamTest(IsolatedStateCase):
             with self.subTest(position=position):
                 self.assertEqual(self.tbstate.stream_line(position), lines[position - 1])
 
+    def test_locate_and_resolve_use_item_relative_offsets(self):
+        self.tbstate.save_item("a", {"title": "A", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "B", "kind": "book"}, ["b1", "b2", "b3"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        self.assertEqual(self.tbstate.locate_position(4), ("b", 2))
+        self.assertEqual(self.tbstate.resolve_position("b", 2), 4)
+        self.assertEqual(self.tbstate.resolve_position("a", 99), 2)
+
 
 class ConfigTest(IsolatedStateCase):
     def test_defaults_applied_to_partial_config(self):

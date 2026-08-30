@@ -88,12 +88,15 @@ def _install(item_id, meta, text, announce=True):
         raise LookupError("nothing readable found in %r" % meta.get("title"))
 
     with tbstate.locked():
+        logical = tbstate.capture_position()
+        old_items = tbstate.load_queue()["items"]
         tbstate.save_item(item_id, meta, fragments)
         queue = tbstate.load_queue()
         if item_id not in queue["items"]:
             queue["items"].append(item_id)
             tbstate.save_queue(queue)
         tbstate.rebuild_stream()
+        tbstate.restore_position(logical, old_items=old_items)
 
     if announce:
         label = meta.get("title") or item_id
@@ -481,14 +484,21 @@ def cmd_queue(args):
     action = args[0] if args else "list"
     if action == "list":
         rows = tbstate.load_index()
+        bookmarks = tbstate.load_bookmarks()
+        current = tbstate.locate_position(tbstate.read_pos())
         if not rows:
             print("Queue is empty.")
         for start, item_id, kind, title in rows:
-            print("%-24s %-9s %s" % (item_id, kind, title))
+            bounds = tbstate.item_bounds(item_id, rows=rows)
+            length = bounds[1] - bounds[0] + 1
+            saved = current[1] if current and current[0] == item_id else bookmarks.get(item_id, 1)
+            print("%-24s %-9s [%d/%d] %s" % (item_id, kind, saved, length, title))
         return
 
     with tbstate.locked():
+        logical = tbstate.capture_position()
         queue = tbstate.load_queue()
+        old_items = list(queue["items"])
         if action == "clear":
             queue["items"] = []
         elif action == "rm" and len(args) > 1:
@@ -497,9 +507,34 @@ def cmd_queue(args):
             raise SystemExit("usage: /book queue [list|rm <id>|clear]")
         tbstate.save_queue(queue)
         tbstate.rebuild_stream()
-    tbstate.write_pos(min(tbstate.read_pos(), max(1, tbstate.stream_count())))
+        tbstate.restore_position(logical, old_items=old_items)
     sync_spinner()
     print("Queue updated.")
+
+
+def cmd_open(args):
+    if not args:
+        raise SystemExit("usage: /book open <id-or-title>")
+    query = " ".join(args).strip()
+    rows = tbstate.load_index()
+    exact = [row for row in rows if row[1] == query]
+    matches = exact or [row for row in rows if query.lower() in row[3].lower()]
+    if not matches:
+        raise SystemExit("no queued item matches %r; run /book queue for ids." % query)
+    if len(matches) > 1:
+        choices = ", ".join("%s (%s)" % (row[3], row[1]) for row in matches)
+        raise SystemExit("%r is ambiguous: %s" % (query, choices))
+
+    with tbstate.locked():
+        tbstate.capture_position()
+        item_id, title = matches[0][1], matches[0][3]
+        offset = tbstate.load_bookmarks().get(item_id, 1)
+        position = tbstate.resolve_position(item_id, offset)
+        tbstate.write_pos(position or 1)
+        tbstate.write_last_advance()
+        tbstate.save_bookmark(item_id, offset)
+    sync_spinner()
+    print("Opened %s at line %d: %s" % (title, offset, current_line() or "(blank)"))
 
 
 def cmd_mode(args):
@@ -714,7 +749,7 @@ def cmd_restore(args):
 
 COMMANDS = {
     "load": cmd_load, "gutenberg": cmd_gutenberg, "libby": cmd_libby, "read": cmd_read,
-    "feed": cmd_feed, "queue": cmd_queue, "status": cmd_status, "mode": cmd_mode,
+    "feed": cmd_feed, "queue": cmd_queue, "open": cmd_open, "status": cmd_status, "mode": cmd_mode,
     "dwell": cmd_dwell, "pause": cmd_pause, "resume": cmd_resume, "pane": cmd_pane,
     "on": cmd_on, "off": cmd_off, "next": cmd_next, "back": cmd_back, "line": cmd_line,
     "repair": cmd_repair, "refresh": cmd_refresh, "version": cmd_version,

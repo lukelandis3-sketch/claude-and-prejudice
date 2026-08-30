@@ -377,3 +377,89 @@ def item_at(index):
         else:
             break
     return current
+
+
+def item_bounds(item_id, rows=None, total=None):
+    """Return inclusive (start, end) bounds for an indexed item."""
+    rows = rows if rows is not None else load_index()
+    total = stream_count() if total is None else total
+    for offset, row in enumerate(rows):
+        if row[1] != item_id:
+            continue
+        end = rows[offset + 1][0] - 1 if offset + 1 < len(rows) else total
+        return row[0], max(row[0], end)
+    return None
+
+
+def locate_position(index, rows=None, total=None):
+    """Map a global cursor to (item_id, one-based relative offset)."""
+    rows = rows if rows is not None else load_index()
+    total = stream_count() if total is None else total
+    current = None
+    for row in rows:
+        if row[0] <= index:
+            current = row
+        else:
+            break
+    if not current:
+        return None
+    bounds = item_bounds(current[1], rows=rows, total=total)
+    relative = max(1, min(index, bounds[1]) - bounds[0] + 1)
+    return current[1], relative
+
+
+def resolve_position(item_id, offset=1, rows=None, total=None):
+    """Map an item bookmark back to a clamped global cursor."""
+    bounds = item_bounds(item_id, rows=rows, total=total)
+    if not bounds:
+        return None
+    try:
+        offset = max(1, int(offset))
+    except (TypeError, ValueError):
+        offset = 1
+    return min(bounds[0] + offset - 1, bounds[1])
+
+
+def load_bookmarks():
+    data = read_json(path("bookmarks.json"), {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_bookmark(item_id, offset):
+    if not item_id:
+        return
+    bookmarks = load_bookmarks()
+    bookmarks[item_id] = max(1, int(offset))
+    write_json(path("bookmarks.json"), bookmarks)
+
+
+def capture_position():
+    """Persist and return the active item's logical bookmark."""
+    logical = locate_position(read_pos())
+    if logical:
+        save_bookmark(*logical)
+    return logical
+
+
+def restore_position(logical, old_items=None):
+    """Restore a logical cursor after rebuilding, with a deterministic removal fallback."""
+    queue = load_queue()["items"]
+    target = logical[0] if logical else None
+    offset = logical[1] if logical else 1
+    position = resolve_position(target, offset) if target in queue else None
+
+    if position is None and target and old_items and target in old_items:
+        removed_at = old_items.index(target)
+        later = [item for item in old_items[removed_at + 1:] if item in queue]
+        earlier = [item for item in old_items[:removed_at] if item in queue]
+        fallback = later[0] if later else earlier[-1] if earlier else None
+        if fallback:
+            position = resolve_position(fallback, load_bookmarks().get(fallback, 1))
+    if position is None:
+        position = 1
+    write_pos(position)
+    write_last_advance()
+    current = locate_position(position)
+    if current:
+        save_bookmark(*current)
+    return position
