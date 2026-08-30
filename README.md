@@ -40,12 +40,13 @@ Or start directly. The plugin detects Gutenberg searches, URLs, EPUB/text files,
 clippings, Readwise exports, and Libby exports:
 
 ```
-/book moby dick
-/book ~/Books/my-book.epub
+/thinking-book:book moby dick
+/thinking-book:book ~/Books/my-book.epub
 ```
 
 The first import enables an empty status-line slot automatically. If you already have a
-status line, thinking-book leaves it alone and tells you to opt in with `/book pane on`,
+status line, thinking-book leaves it alone and tells you to opt in with
+`/thinking-book:book display hud`,
 which runs both. Restart Claude Code once if a newly enabled status line is not visible.
 
 ## Reading
@@ -62,23 +63,23 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 | `/thinking-book:n` | Turn the page — advance one line |
 | `/thinking-book:b` | Back one line |
 | `/thinking-book:setup <book>` | Start your book with HUD, spinner, and 250 WPM |
-| `/book` | Compact reading dashboard and controls |
-| `/book status` | Dashboard plus display details and the whole queue |
-| `/book queue` | A numbered library with each book's bookmark |
-| `/book open <number-or-title>` | Switch books; each one keeps its own bookmark |
-| `/book queue rm <number-or-title>` | Remove a book and continue at the next one |
-| `/book mode timer\|turn\|manual` | How pages turn (below) |
-| `/book pace <wpm>` | Set the timer's reading speed (default 250 WPM) |
-| `/book pause` / `/book resume` | Freeze on a line, or carry on |
-| `/book display hud\|line\|spinner\|off` | Choose where and how the book appears |
-| `/book on` / `/book off` | Enable reading, or restore every setting it touched |
-| `/book repair` | Undo a self-wrapped status line (see below) |
-| `/book version` | Which version is running, and from which directory |
-| `/book refresh <secs\|off>` | Set `statusLine.refreshInterval` where your version supports it |
+| `/thinking-book:book` | Compact reading dashboard and controls |
+| `/thinking-book:book status` | Dashboard plus display details and the whole queue |
+| `/thinking-book:book queue` | A numbered library with each book's bookmark |
+| `/thinking-book:book open <number-or-title>` | Switch books; each one keeps its own bookmark |
+| `/thinking-book:book queue rm <number-or-title>` | Remove a book and continue at the next one |
+| `/thinking-book:book mode timer\|turn\|manual` | How pages turn (below) |
+| `/thinking-book:book pace <wpm>` | Set the timer's reading speed (default 250 WPM) |
+| `/thinking-book:book pause` / `/thinking-book:book resume` | Freeze on a line, or carry on |
+| `/thinking-book:book display hud\|line\|spinner\|off` | Choose where the book appears |
+| `/thinking-book:book on` / `/thinking-book:book off` | Enable reading, or restore every setting it touched |
+| `/thinking-book:book repair` | Repair a moved or self-wrapped status line |
+| `/thinking-book:book version` | Which version is running, and from which directory |
+| `/thinking-book:book refresh <secs\|off>` | Set `statusLine.refreshInterval` where supported |
 
 ### Graphical reading HUD
 
-`/book display hud` adds a precomputed progress row above the prose:
+`/thinking-book:book display hud` adds a precomputed progress row above the prose:
 
 ```
 Moby-Dick · ████░░░░░░ 124/310 (40%) · 250 wpm
@@ -89,10 +90,10 @@ It is optional and off by default. Normal mode retains the original one-line dis
 one bounded lookup, and does not generate HUD shards. Enabling the HUD adds matching
 256-line metadata shards without republishing the prose; each display then performs one
 additional bounded lookup. It never starts Python or scans the book. Switch back with
-`/book display line`, use only the live spinner with `/book display spinner`, or restore with
-`/book display off`.
+`/thinking-book:book display line`, use only the live spinner with
+`/thinking-book:book display spinner`, or restore with `/thinking-book:book display off`.
 
-The HUD is display-only. The `/book` dashboard identifies the reading surface and explains
+The HUD is display-only. The `/thinking-book:book` dashboard identifies the reading surface and explains
 the active page-turn mode. It does not steer timer-mode readers into shell commands that
 clutter the transcript.
 
@@ -127,7 +128,7 @@ your position, updates when something else moves the bookmark (timer mode or `bo
 writes through to the same position file — so the spinner in the Claude pane follows along on
 its next turn. One bookmark, several windows.
 
-Pair it with `/book mode manual`, or lines will keep advancing on the clock underneath you.
+Pair it with `/thinking-book:book mode manual`, or lines will keep advancing underneath you.
 
 ### A one-key binding
 
@@ -151,23 +152,25 @@ mkdir -p ~/.claude/commands
 cat > ~/.claude/commands/n.md <<'EOF'
 ---
 description: Turn the page
-allowed-tools: Bash(python3:*)
+allowed-tools: Bash(book:*)
 ---
-!`python3 ~/.claude/plugins/*/thinking-book/scripts/thinking_book.py next`
+!`book next`
 EOF
 ```
 
-Adjust the path to wherever the plugin is installed.
+This uses the stable local launcher, so plugin updates cannot invalidate the command path.
 
 ### Advance modes
 
 - **`timer`** (default) — each fragment stays up for its word count at 250 WPM, with a
   two-second minimum for short headings. It advances at most once per status-line refresh,
   so quiet turns read slower than the nominal pace and walking away never skips hundreds
-  of lines. `/book pace <wpm>` adjusts it; `/book dwell <seconds>` remains available for a
+  of lines. `/thinking-book:book pace <wpm>` adjusts it;
+  `/thinking-book:book dwell <seconds>` remains available for a
   fixed interval.
 
-Existing installations keep their fixed-second pace until you run `/book pace 250` or
+Existing installations keep their fixed-second pace until you run
+`/thinking-book:book pace 250` or
 start a new book through setup.
 - **`turn`** — exactly one line per assistant turn, regardless of how long it took.
 - **`manual`** — the line holds until you type `/n`.
@@ -176,9 +179,9 @@ start a new book through setup.
 
 | Command | Source | Gives you |
 |---|---|---|
-| `/book <title\|url\|file>` | Auto-detected source | Books, articles, or highlights, opened immediately |
-| `/book add <title\|url\|file>` | Auto-detected source | Books, articles, or highlights, queued for later |
-| `/book feed add <url>` | An RSS or Atom feed | New articles, queued automatically |
+| `/thinking-book:book <title\|url\|file>` | Auto-detected source | Books, articles, or highlights, opened immediately |
+| `/thinking-book:book add <title\|url\|file>` | Auto-detected source | Books, articles, or highlights, queued for later |
+| `/thinking-book:book feed add <url>` | An RSS or Atom feed | New articles, queued automatically |
 
 Items form a queue and are read in order; when one runs out the next begins. Feeds top the
 queue up at session start, in the background, at most three new articles per feed per hour.
@@ -194,7 +197,7 @@ plugin, and it does not try.
 - **Libby/OverDrive has no public API**, but it does let you
   [export a title's Reading Journey](https://help.libbyapp.com/en-us/6151.htm) — highlights,
   notes, chapter and position — as JSON, and that export keeps working after you return
-  the book. `/book add` reads that file.
+  the book. `/thinking-book:book add` reads that file.
 
 **This plugin does not strip DRM** — not Kindle KFX, not Adobe DRM, not Apple Books. An
 encrypted EPUB is rejected with an explanation rather than worked around. For sequential
@@ -203,7 +206,7 @@ the public domain, or the open web.
 
 `My Clippings.txt` and Readwise imports are offline and contain only excerpts the user
 exported. They do not read or decrypt Kindle book files. The standard filename is also
-recognized automatically by `/book load <path/to/My Clippings.txt>`.
+recognized automatically by `/thinking-book:book load <path/to/My Clippings.txt>`.
 
 ## How it works
 
@@ -225,9 +228,9 @@ publishes them through one atomic generation pointer. Optional HUD metadata shar
 added atomically beside them. The shell reads one prose shard and, only when the HUD is
 enabled, one matching metadata shard. Longer passages from older libraries wrap at the
 terminal edge instead of being clipped, while normal lines keep the same fast path.
-Across 100 invocations on the development Mac at line 25,000 of 25,000, compact manual mode
-measured 7.12 ms median (8.82 ms p95); the 250 WPM timer measured 9.31 ms median
-(10.71 ms p95), and the graphical HUD measured 11.53 ms median (13.14 ms p95), against a
+Across 200 invocations on the development Mac at line 25,000 of 25,000, compact manual mode
+measured 6.95 ms median (7.43 ms p95); the 250 WPM timer measured 9.55 ms median
+(10.74 ms p95), and the graphical HUD measured 11.79 ms median (12.89 ms p95), against a
 5 s timeout.
 
 State lives in `~/.claude/thinking-book/`. JSON files are the human-readable record;
@@ -249,21 +252,20 @@ stream rebuild measured 34 ms; the book is not duplicated into a second full-str
   strongest argument for the status line being the primary surface, since that one persists.
 - **The spinner text cannot change during a turn.** It's captured in a `useState`
   initializer when the spinner mounts. A manual advance lands on the *next* spinner.
-- **No single key can turn the page.** Claude Code's keybindings map to a closed enum of
-  built-in actions; there's no "run a command" action to bind. `/n` is the shortest path.
+- **No plugin keybinding can turn the page.** Claude Code's keybindings map to a closed
+  enum of built-in actions. Use automatic pacing, `book reader`, or a terminal hotkey.
 - **The status line has no wall-clock refresh** — it advances per assistant message, so a
   long single tool call holds its line.
 - **Subagent panes show the stock verbs.** Task spinners bypass `spinnerVerbs` entirely.
 - **An in-progress todo outranks the spinner verb**, so reading pauses during todo work.
 - **`disableAllHooks: true` disables the status line too**, and the plugin goes dark.
-- **Concurrent sessions** share one global setting and will interleave each other's lines.
-  Locking keeps state valid; a status-line page turn can race a queue rebuild by at most
-  one line because portable POSIX `sh` cannot take Python's `flock` on macOS.
+- **Concurrent sessions** share one global setting and can interleave lines. A generation
+  check prevents an old status-line process from writing its cursor into a rebuilt queue.
 - **`refreshInterval` may not exist in your version.** Claude Code 2.1.251 has no such key,
-  so `/book refresh` is a no-op there; other versions (and tools like ccstatusline) do use
+  so `/thinking-book:book refresh` is a no-op there; other versions do use
   it. Harmless either way — unknown settings keys are ignored.
 - **Your `settings.json` gets reformatted** on first actual change. The original bytes are
-  kept at `~/.claude/thinking-book/settings.backup.raw` for v0.4+ installs, and `/book off`
+  kept at `~/.claude/thinking-book/settings.backup.raw`, and `/thinking-book:book off`
   restores every value the plugin touched, including missing, null, and custom values.
   Malformed settings are never replaced; the command names the file to repair.
 
@@ -279,7 +281,7 @@ re-read the same global `wrapped.cmd` and invoked itself, recursing until Claude
 timeout killed it and printing the same line a dozen times over.
 
 ```
-/book repair
+/thinking-book:book repair
 ```
 
 0.2 makes this impossible three ways over: an exported `TB_IN_STATUSLINE` guard that stops
@@ -288,7 +290,10 @@ script wherever it was installed from, and `repair` to unwind machines already i
 
 Unlike most status line tools — [ccstatusline](https://github.com/sirmalloc/ccstatusline) and
 friends simply overwrite `statusLine` — thinking-book wraps whatever you already had and runs
-it alongside the book. `/book off` puts it back exactly as it was.
+it alongside the book. `/thinking-book:book off` puts it back exactly as it was.
+
+Before uninstalling, run `/thinking-book:book off` so Claude's settings are restored while
+the plugin is still present.
 
 ## Keeping it up to date
 
@@ -297,7 +302,7 @@ so it does not update itself — `git pull` in that directory *is* the update, f
 restart if `hooks/hooks.json` changed.
 
 If a command-shaped typo errors with `unknown command`, the message names the version and
-directory it ran from. Compare those against `/book version` and this README.
+directory it ran from. Compare those against `/thinking-book:book version` and this README.
 
 ## Development
 

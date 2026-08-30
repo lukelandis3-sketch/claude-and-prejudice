@@ -40,6 +40,11 @@ class EntryPointTest(IsolatedStateCase):
         self.assertEqual(self.run_book("--nonsense").returncode, 2)
         self.assertEqual(self.run_book("load", "/nonexistent.epub").returncode, 1)
 
+    def test_local_help_uses_the_local_book_command(self):
+        result = self.run_book("help")
+        self.assertIn("book <title|url|file>", result.stdout)
+        self.assertNotIn("/thinking-book:book", result.stdout)
+
     def test_works_through_a_symlink_from_another_directory(self):
         # This is how it lands on PATH, so it must resolve its own location.
         link_dir = os.path.join(self.config_dir, "bin")
@@ -112,6 +117,59 @@ class InstallCliTest(IsolatedStateCase):
         result = self.run_cli("install-cli", target)
         self.assertEqual(result.returncode, 1)
         self.assertIn("already exists", result.stderr)
+
+    def test_repoints_a_stale_launcher_from_an_older_plugin_cache(self):
+        target = os.path.join(self.config_dir, "bin")
+        old = os.path.join(self.config_dir, "cache", "thinking-book", "0.8.2", "bin")
+        os.makedirs(old)
+        old_book = os.path.join(old, "book")
+        with open(old_book, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.makedirs(target)
+        link = os.path.join(target, "book")
+        os.symlink(old_book, link)
+
+        result = self.run_cli("install-cli", target)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Updated", result.stdout)
+        self.assertEqual(
+            os.path.realpath(link), os.path.realpath(os.path.join(support.REPO, "bin", "book")))
+
+    def test_repoints_a_live_launcher_from_an_arbitrarily_named_plugin_root(self):
+        target = os.path.join(self.config_dir, "bin")
+        old_root = os.path.join(self.config_dir, "reader-plugin")
+        os.makedirs(os.path.join(old_root, "bin"))
+        os.makedirs(os.path.join(old_root, "scripts"))
+        old_book = os.path.join(old_root, "bin", "book")
+        with open(old_book, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        with open(os.path.join(old_root, "scripts", "thinking_book.py"), "w") as fh:
+            fh.write("# marker\n")
+        os.makedirs(target)
+        os.symlink(old_book, os.path.join(target, "book"))
+
+        result = self.run_cli("install-cli", target)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Updated", result.stdout)
+
+    def test_does_not_repoint_an_unrelated_live_bin_book_symlink(self):
+        target = os.path.join(self.config_dir, "bin")
+        unrelated = os.path.join(self.config_dir, "someone-else", "bin")
+        os.makedirs(unrelated)
+        old_book = os.path.join(unrelated, "book")
+        with open(old_book, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.makedirs(target)
+        link = os.path.join(target, "book")
+        os.symlink(old_book, link)
+
+        result = self.run_cli("install-cli", target)
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("already exists", result.stderr)
+        self.assertEqual(os.path.realpath(link), os.path.realpath(old_book))
 
 
 if __name__ == "__main__":

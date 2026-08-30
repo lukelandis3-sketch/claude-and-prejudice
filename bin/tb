@@ -26,4 +26,6 @@ root=$(cd "$(dirname "$target")/.." && pwd) || {
     exit 1
 }
 
+THINKING_BOOK_COMMAND=tb
+export THINKING_BOOK_COMMAND
 exec python3 "$root/scripts/thinking_book.py" "$@"

@@ -50,6 +50,10 @@ class IdentityTest(unittest.TestCase):
         self.assertTrue(tb.is_our_statusline({"type": "command", "command": command}))
         self.assertTrue(tb.is_our_statusline(command))
 
+    def test_recognises_a_missing_script_from_the_public_repo_name(self):
+        command = 'sh "/tmp/old claude-and-prejudice/scripts/statusline.sh"'
+        self.assertTrue(tb.is_our_statusline(command))
+
 
 class StatusLineEntryTest(unittest.TestCase):
     def test_a_string_becomes_a_command_entry(self):

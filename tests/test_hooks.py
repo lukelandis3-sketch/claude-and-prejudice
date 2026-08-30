@@ -38,13 +38,83 @@ class HookTest(IsolatedStateCase):
         self.run_cli("sync")
         self.assertTrue(os.path.exists(self.tbstate.path("hot.env")))
 
+    def test_sync_does_not_publish_empty_generations_without_a_queue(self):
+        self.run_cli("sync", "--quiet")
+        self.run_cli("sync", "--quiet")
+        self.assertFalse(os.path.exists(self.tbstate.path("stream.gen")))
+
+    def test_sync_repoints_a_missing_statusline_from_an_older_install(self):
+        import thinking_book
+        old = 'sh "/tmp/old claude-and-prejudice/scripts/statusline.sh"'
+        with open(self.tbstate.settings_path(), "w") as fh:
+            json.dump({
+                "theme": "dark",
+                "statusLine": {"type": "command", "command": old, "padding": 3},
+            }, fh)
+
+        self.run_cli("sync", "--quiet")
+
+        settings = self.settings()
+        self.assertEqual(settings["theme"], "dark")
+        self.assertEqual(settings["statusLine"]["command"], thinking_book.statusline_command())
+        self.assertEqual(settings["statusLine"]["padding"], 3)
+
+        self.run_cli("off")
+        self.assertNotIn("statusLine", self.settings())
+        self.assertEqual(self.settings()["theme"], "dark")
+
+    def test_sync_repair_restores_the_statusline_an_old_install_wrapped(self):
+        import thinking_book
+        old = 'sh "/tmp/old-thinking-book/scripts/statusline.sh"'
+        original = {"type": "command", "command": "my-prompt", "padding": 2}
+        config = self.tbstate.load_config()
+        config["wrapped_statusline"] = original
+        self.tbstate.save_config(config)
+        with open(self.tbstate.settings_path(), "w") as fh:
+            json.dump({"statusLine": {"type": "command", "command": old}}, fh)
+
+        self.run_cli("sync", "--quiet")
+        self.assertEqual(
+            self.settings()["statusLine"]["command"], thinking_book.statusline_command())
+
+        self.run_cli("off")
+        self.assertEqual(self.settings()["statusLine"], original)
+
+    def test_sync_does_not_repair_a_disabled_statusline_surface(self):
+        old = 'sh "/tmp/old-thinking-book/scripts/statusline.sh"'
+        config = self.tbstate.load_config()
+        config["surfaces"]["statusline"] = False
+        self.tbstate.save_config(config)
+        with open(self.tbstate.settings_path(), "w") as fh:
+            json.dump({"statusLine": {"type": "command", "command": old}}, fh)
+
+        self.run_cli("sync", "--quiet")
+
+        self.assertEqual(self.settings()["statusLine"]["command"], old)
+
+    def test_malformed_settings_do_not_prevent_stream_recovery(self):
+        import shutil
+        self.seed_stream(["one", "two"], mode="manual")
+        os.unlink(self.tbstate.path("hot.env"))
+        shutil.rmtree(self.tbstate.path("stream-generations"))
+        with open(self.tbstate.settings_path(), "w") as fh:
+            fh.write("{ broken")
+
+        result = self.run_cli("sync", "--quiet")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertTrue(os.path.exists(self.tbstate.path("hot.env")))
+        self.assertEqual(self.tbstate.stream_line(1), "one")
+
     def test_sync_rebuilds_when_generation_directory_is_gone(self):
         import shutil
         self.seed_stream(["one", "two"], mode="manual")
         shutil.rmtree(self.tbstate.path("stream-generations"))
         self.run_cli("sync", "--quiet")
         self.assertEqual(self.tbstate.stream_line(1), "one")
-        self.assertEqual(self.run_statusline().stdout.strip(), "one")
+        self.assertEqual(self.run_statusline().stdout.strip(), "📖 one")
 
     def test_sync_upgrades_legacy_shards_when_wpm_is_enabled(self):
         self.seed_stream(["one two three"], mode="timer", wpm=250)
@@ -265,7 +335,7 @@ class HookTest(IsolatedStateCase):
         result = self.run_cli("")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("No book yet", result.stdout)
-        self.assertIn("/book <title|url|file>", result.stdout)
+        self.assertIn("/thinking-book:book <title|url|file>", result.stdout)
         self.assertNotIn("unknown command", result.stderr)
 
     def test_setup_command_uses_native_questions_and_only_the_safe_cli(self):
@@ -282,7 +352,7 @@ class HookTest(IsolatedStateCase):
     def test_help_command_prints_task_oriented_help(self):
         result = self.run_cli("help")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Read: /book <title|url|file>", result.stdout)
+        self.assertIn("Read: /thinking-book:book <title|url|file>", result.stdout)
         self.assertNotIn("refresh-feeds", result.stdout)
         self.assertNotIn("All commands:", result.stdout)
         self.assertNotIn("display on", result.stdout)

@@ -133,8 +133,10 @@ def _consume_legacy(key):
         tbstate.write_json(migration_path(), {"keys": pending})
 
 
-def _remember_origins(settings, keys):
+def _remember_origins(settings, keys, records=None):
     origins = tbstate.read_json(origins_path(), {})
+    origins = origins if isinstance(origins, dict) else {}
+    records = records if isinstance(records, dict) else {}
     pending = _legacy_pending()
     changed = False
     for key in keys:
@@ -144,6 +146,10 @@ def _remember_origins(settings, keys):
         if key in pending:
             present, value = legacy is not _MISSING, legacy
             _consume_legacy(key)
+        elif key in records:
+            record = records[key]
+            present = bool(record.get("present"))
+            value = record.get("value")
         else:
             present, value = key in settings, settings.get(key)
         origins[key] = {"present": present}
@@ -231,7 +237,7 @@ def _owns_key(key):
     )
 
 
-def update(mutator, touched=(), record_key=None, retire=()):
+def update(mutator, touched=(), record_key=None, retire=(), origin_records=None):
     """Read-modify-write settings.json under a lock, backing it up before the first edit.
 
     `mutator` receives the settings dict and mutates it in place.
@@ -256,7 +262,7 @@ def update(mutator, touched=(), record_key=None, retire=()):
             raw = fh.read()
         _raw_backup_once(raw)
         _backup_once(before)
-        _remember_origins(before, touched)
+        _remember_origins(before, touched, origin_records)
         tbstate.write_json(tbstate.settings_path(), settings)
         if record_key is not None:
             _record_written(record_key, settings[record_key])
@@ -322,7 +328,7 @@ def current_statusline():
     return read_settings().get(STATUSLINE_KEY)
 
 
-def set_statusline(command, padding=None, refresh_interval=None):
+def set_statusline(command, padding=None, refresh_interval=None, origin_record=None):
     """Install our status line command.
 
     `refresh_interval` is written only when set. It is not in every Claude Code version's
@@ -344,7 +350,9 @@ def set_statusline(command, padding=None, refresh_interval=None):
         settings[STATUSLINE_KEY] = entry
 
     settings, _changed = update(
-        mutate, touched=(STATUSLINE_KEY,), record_key=STATUSLINE_KEY
+        mutate, touched=(STATUSLINE_KEY,), record_key=STATUSLINE_KEY,
+        origin_records=({STATUSLINE_KEY: origin_record}
+                        if origin_record is not None else None),
     )
     return settings
 

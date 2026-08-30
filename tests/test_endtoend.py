@@ -119,7 +119,7 @@ class RoundTripTest(IsolatedStateCase):
         self.assertIn("Pages turn automatically", dashboard.stdout)
         self.assertNotIn("Next:", dashboard.stdout)
         self.assertNotIn("!tb n", dashboard.stdout)
-        self.assertIn("/book help", dashboard.stdout)
+        self.assertIn("/thinking-book:book help", dashboard.stdout)
         self.assertNotIn("All commands:", dashboard.stdout)
         self.assertNotIn("thinking-book 0.", dashboard.stdout)
         self.assertNotIn("Current:", dashboard.stdout)
@@ -290,7 +290,7 @@ class RoundTripTest(IsolatedStateCase):
         result = self.run_cli(other)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("thinking-book is off", result.stdout)
-        self.assertIn("/book on", result.stdout)
+        self.assertIn("/thinking-book:book on", result.stdout)
 
     def test_corrupt_queue_does_not_make_implicit_import_reset_preferences(self):
         self.run_cli("start", self.book)
@@ -458,8 +458,7 @@ class RoundTripTest(IsolatedStateCase):
     def test_start_without_any_book_asks_for_one_concisely(self):
         result = self.run_cli("start")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("/book <title|url|file>", result.stderr)
-        self.assertNotIn("/thinking-book", result.stderr)
+        self.assertIn("/thinking-book:book <title|url|file>", result.stderr)
         self.assertLessEqual(len(result.stderr.splitlines()), 1)
 
     def test_start_does_not_replace_a_third_party_statusline(self):
@@ -473,7 +472,7 @@ class RoundTripTest(IsolatedStateCase):
             self.tbstate.load_config()["surfaces"],
             {"statusline": False, "spinner": True},
         )
-        self.assertIn("/book pane on", result.stdout)
+        self.assertIn("/thinking-book:book display hud", result.stdout)
         self.assertLessEqual(len(result.stdout.splitlines()), 2, result.stdout)
         generation = self.tbstate.stream_generation_dir()
         self.assertFalse(os.path.exists(os.path.join(generation, "0.hud")))
@@ -587,7 +586,7 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.tbstate.load_config()["words_per_minute"], 180)
         self.assertIn("180 words per minute", result.stdout)
-        self.assertIn("/book mode timer", result.stdout)
+        self.assertIn("/thinking-book:book mode timer", result.stdout)
 
         self.run_cli("dwell", "7")
         config = self.tbstate.load_config()
@@ -608,12 +607,13 @@ class RoundTripTest(IsolatedStateCase):
         for value in ("fast", "0", "9" * 5000):
             result = self.run_cli("pace", value)
             self.assertEqual(result.returncode, 1)
-            self.assertIn("usage: /book pace", result.stderr)
+            self.assertIn("usage: /thinking-book:book pace", result.stderr)
 
     def test_excessive_dwell_has_a_stable_usage_error(self):
-        result = self.run_cli("dwell", "9" * 10000)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("usage: /book dwell", result.stderr)
+        for value in ("0", "9" * 10000):
+            result = self.run_cli("dwell", value)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("usage: /thinking-book:book dwell", result.stderr)
 
     def test_manual_turn_reports_book_changes_and_stream_boundaries(self):
         self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1"])
@@ -623,7 +623,7 @@ class RoundTripTest(IsolatedStateCase):
         self.tbstate.write_pos(1)
 
         crossed = self.run_cli("next")
-        self.assertIn("📖 Beta", crossed.stdout)
+        self.assertIn("Book: Beta", crossed.stdout)
         self.assertIn("b1", crossed.stdout)
         end = self.run_cli("next")
         self.assertIn("End of Beta", end.stdout)
@@ -646,10 +646,10 @@ class RoundTripTest(IsolatedStateCase):
         self.run_cli("load", self.book)
         self.run_cli("off")
         dashboard = self.run_cli("")
-        self.assertIn("off — /book on", dashboard.stdout)
+        self.assertIn("off — /thinking-book:book on", dashboard.stdout)
         self.assertIn("Reading surface is off.", dashboard.stdout)
         self.assertNotIn("Read below the input box.", dashboard.stdout)
-        self.assertNotIn("Pause: /book pause", dashboard.stdout)
+        self.assertNotIn("Pause: /thinking-book:book pause", dashboard.stdout)
 
     def test_dashboard_names_the_spinner_when_the_status_line_is_off(self):
         self.run_cli("load", self.book)
@@ -664,15 +664,15 @@ class RoundTripTest(IsolatedStateCase):
         for command in ((), ("next",), ("sync",)):
             with self.subTest(command=command):
                 result = self.run_cli(*command)
-                self.assertIn("/book <title|url|file>", result.stdout)
-                self.assertNotIn("/book add <title|url|file>", result.stdout)
+                self.assertIn("/thinking-book:book <title|url|file>", result.stdout)
+                self.assertNotIn("/thinking-book:book add <title|url|file>", result.stdout)
 
     def test_dashboard_reports_damaged_queue_instead_of_calling_it_empty(self):
         self.tbstate.save_queue({"items": ["missing-fragments"]})
         self.tbstate.rebuild_stream()
         dashboard = self.run_cli("")
         self.assertIn("unavailable", dashboard.stdout)
-        self.assertIn("/book queue", dashboard.stdout)
+        self.assertIn("/thinking-book:book queue", dashboard.stdout)
         self.assertNotIn("No book is queued", dashboard.stdout)
 
     def test_hud_command_enables_and_disables_the_graphical_status(self):
@@ -884,7 +884,7 @@ class RoundTripTest(IsolatedStateCase):
         result = self.run_cli("pane", "on")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(self.tbstate.load_config()["paused"])
-        self.assertIn("/book resume", result.stdout)
+        self.assertIn("/thinking-book:book resume", result.stdout)
 
     def test_turn_reads_the_current_line_once(self):
         import thinking_book
@@ -1162,7 +1162,7 @@ class RoundTripTest(IsolatedStateCase):
         with open(another, "w") as fh:
             fh.write("Another readable sentence.")
         result = self.run_cli("load", another)
-        self.assertIn("run /book on", result.stdout)
+        self.assertIn("run /thinking-book:book on", result.stdout)
         self.assertTrue(self.tbstate.load_config()["paused"])
 
     def test_clippings_batch_reimport_is_stable_across_file_paths(self):

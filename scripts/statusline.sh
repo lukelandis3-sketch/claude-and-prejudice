@@ -166,10 +166,16 @@ if [ "$TB_STATUSLINE" = "1" ] && [ "$TB_PAUSED" = "0" ] && [ "$TB_MODE" = "timer
             mv "$TB_DIR/last.tmp.$$" "$TB_DIR/last" 2>/dev/null
     elif [ "$NOW" -gt 0 ] && [ $((NOW - LAST)) -ge "$INTERVAL" ]; then
         if [ "$POS" -lt "$COUNT" ]; then
-            POS=$((POS + 1))
-            printf '%s\n' "$POS" > "$TB_DIR/pos.tmp.$$" 2>/dev/null &&
-                mv "$TB_DIR/pos.tmp.$$" "$TB_DIR/pos" 2>/dev/null
-            load_line
+            # A Python rebuild can atomically switch generations while this shell is
+            # running. Never write an old numeric cursor into the new book layout.
+            GEN_NOW=''
+            IFS= read -r GEN_NOW 2>/dev/null < "$TB_DIR/stream.gen" || GEN_NOW=''
+            if [ "$GEN_NOW" = "$GEN" ]; then
+                POS=$((POS + 1))
+                printf '%s\n' "$POS" > "$TB_DIR/pos.tmp.$$" 2>/dev/null &&
+                    mv "$TB_DIR/pos.tmp.$$" "$TB_DIR/pos" 2>/dev/null
+                load_line
+            fi
         fi
         printf '%s\n' "$NOW" > "$TB_DIR/last.tmp.$$" 2>/dev/null &&
             mv "$TB_DIR/last.tmp.$$" "$TB_DIR/last" 2>/dev/null
@@ -215,8 +221,7 @@ if [ -n "$HUD" ]; then
     printf '%s\n' "$HUD"
 fi
 if [ -n "$LINE" ]; then
-    BOOK_LINE="${TB_PREFIX}${LINE}"
-    [ "$TB_HUD" = "1" ] && BOOK_LINE="📖 $BOOK_LINE"
+    BOOK_LINE="📖 ${TB_PREFIX}${LINE}"
     # Claude reserves a few columns around the status line. Keep a readable 100-column
     # ceiling, honour narrower exported terminal widths, and preserve every word by
     # wrapping only the uncommon over-long fragment. Short lines spawn no extra process.
