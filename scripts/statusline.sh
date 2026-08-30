@@ -183,6 +183,12 @@ if [ "$TB_STATUSLINE" = "1" ] && [ -n "$STREAM_DIR" ] && [ "$POS" -le "$COUNT" ]
     if [ "$TB_HUD" = "1" ]; then
         HUD=$(sed -n "${ROW}{p;q;}" "$STREAM_DIR/$SHARD.hud" 2>/dev/null) || HUD=''
         if [ -n "$HUD" ]; then
+            # Normalise already-published HUD rows in place; users should not have to
+            # re-import or rebuild a book when the visual marker moves to the prose.
+            case "$HUD" in
+                "READ HERE · "*) HUD=${HUD#"READ HERE · "} ;;
+                "📖 "*) HUD=${HUD#"📖 "} ;;
+            esac
             if [ "$TB_MODE" = "timer" ]; then
                 if [ "$WPM_OK" = "1" ]; then
                     HUD="$HUD · ${TB_WPM} wpm"
@@ -210,6 +216,7 @@ if [ -n "$HUD" ]; then
 fi
 if [ -n "$LINE" ]; then
     BOOK_LINE="${TB_PREFIX}${LINE}"
+    [ "$TB_HUD" = "1" ] && BOOK_LINE="📖 $BOOK_LINE"
     # Claude reserves a few columns around the status line. Keep a readable 100-column
     # ceiling, honour narrower exported terminal widths, and preserve every word by
     # wrapping only the uncommon over-long fragment. Short lines spawn no extra process.

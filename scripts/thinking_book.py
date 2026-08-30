@@ -389,7 +389,7 @@ def cmd_start(args):
     pace = "250 WPM" if args else _pace_label(config)
     extra = " (+%d more)" % (len(written) - 1) if len(written) > 1 else ""
     print("Ready — %s%s · %s · %s" % (label, extra, display, pace))
-    controls = _controls_hint()
+    controls = _controls_hint(config)
     if not surfaces["statusline"] and args:
         controls += " · HUD skipped: /book pane on"
     print(controls)
@@ -884,15 +884,20 @@ def _resolve_queue_item(query, rows=None):
     return matches[0]
 
 
-def _controls_hint():
-    """Prefer zero-model-turn controls when the bundled `tb` is already on PATH."""
+def _controls_hint(config):
+    """Describe page turns without steering users into a noisy Claude transcript."""
+    if config["mode"] == "timer":
+        return "Timer paused" if config["paused"] else "Pages turn automatically"
+    if config["mode"] == "turn":
+        return "Page turns after each response"
+
     import shutil
     short_tb = shutil.which("tb")
     bundled_tb = os.path.join(plugin_root(), "bin", "tb")
     if short_tb and os.path.realpath(short_tb) == os.path.realpath(bundled_tb):
-        return "Next: !tb n · Back: !tb b"
+        return "Manual controls in another terminal: tb n · tb b"
     return ("Next: /thinking-book:n · Back: /thinking-book:b · "
-            "Local controls: /book install-cli")
+            "External controls: /book install-cli")
 
 
 def cmd_dashboard(args):
@@ -918,7 +923,7 @@ def cmd_dashboard(args):
 
     meta = tbstate.item_meta(active["id"])
     author = meta.get("author") if isinstance(meta, dict) else None
-    heading = "📖 %s%s" % (active["title"], " — %s" % author if author else "")
+    heading = "Book: %s%s" % (active["title"], " — %s" % author if author else "")
     percent = (active["offset"] * 100) // max(1, active["length"])
     surfaces = config["surfaces"]
     if not (surfaces["statusline"] or surfaces["spinner"]):
@@ -935,8 +940,13 @@ def cmd_dashboard(args):
     print("%s %d/%d (%d%%)%s · %s · %s" % (
         tbstate.progress_bar(active["offset"], active["length"]),
         active["offset"], active["length"], percent, library, pace, state))
-    print(current_line() or "(blank)")
-    controls = _controls_hint()
+    if surfaces["statusline"]:
+        print("Read below the input box.")
+    elif surfaces["spinner"]:
+        print("Read on the live spinner while Claude works.")
+    else:
+        print("Reading surface is off.")
+    controls = _controls_hint(config)
     if not (surfaces["statusline"] or surfaces["spinner"]):
         controls += " · Enable: /book on"
     elif config["paused"]:
@@ -1202,8 +1212,7 @@ def cmd_install_cli(args):
         print("Note: %s is not on your PATH. Add it, or symlink tb somewhere that is."
               % target_dir)
     else:
-        print("Turn the page with `tb n` in any terminal, or `!tb n` inside Claude Code "
-              "(no model turn).")
+        print("Turn the page with `tb n` in another terminal; Claude stays out of it.")
 
 
 def cmd_version(_args):

@@ -139,8 +139,8 @@ class StatusLineTest(IsolatedStateCase):
 
         lines = self.run_statusline().stdout.strip().split("\n")
         self.assertEqual(lines, [
-            "📖 Test Item · █████░░░░░ 1/2 (50%) · manual",
-            "one",
+            "Test Item · █████░░░░░ 1/2 (50%) · manual",
+            "📖 one",
         ])
 
     def test_hud_marks_paused_timer_mode(self):
@@ -159,7 +159,17 @@ class StatusLineTest(IsolatedStateCase):
         self.seed_stream(["one"], mode="manual")
         self._enable_hud()
         os.unlink(os.path.join(self.tbstate.stream_generation_dir(), "0.hud"))
-        self.assertEqual(self.run_statusline().stdout.strip(), "one")
+        self.assertEqual(self.run_statusline().stdout.strip(), "📖 one")
+
+    def test_existing_hud_generation_moves_the_book_icon_to_the_prose(self):
+        self.seed_stream(["one"], mode="manual")
+        self._enable_hud()
+        shard = os.path.join(self.tbstate.stream_generation_dir(), "0.hud")
+        self.tbstate.atomic_write(shard, "📖 Test Item · ██████████ 1/1 (100%)\n")
+
+        lines = self.run_statusline().stdout.splitlines()
+        self.assertEqual(lines[0], "Test Item · ██████████ 1/1 (100%) · manual")
+        self.assertEqual(lines[1], "📖 one")
 
     def test_hud_metadata_stays_aligned_across_shard_boundaries(self):
         lines = ["line-%d" % n for n in range(1, 259)]
@@ -170,7 +180,7 @@ class StatusLineTest(IsolatedStateCase):
                 self.tbstate.write_pos(position)
                 output = self.run_statusline().stdout.splitlines()
                 self.assertIn("%d/258" % position, output[0])
-                self.assertEqual(output[1], "line-%d" % position)
+                self.assertEqual(output[1], "📖 line-%d" % position)
 
     # ------------------------------------------------------------- wrapping
 
@@ -189,8 +199,8 @@ class StatusLineTest(IsolatedStateCase):
         self._wrap("echo 'my own status line'")
         lines = self.run_statusline().stdout.strip().split("\n")
         self.assertEqual(lines[0], "my own status line")
-        self.assertTrue(lines[1].startswith("📖 Test Item"))
-        self.assertEqual(lines[2], "one")
+        self.assertTrue(lines[1].startswith("Test Item"))
+        self.assertEqual(lines[2], "📖 one")
 
     def test_wrapped_status_line_receives_the_session_json_on_stdin(self):
         self.seed_stream(["a line"], mode="manual")

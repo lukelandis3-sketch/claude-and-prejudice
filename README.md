@@ -3,8 +3,8 @@
 Read a book in the margins of Claude Code—one status line at a time.
 
 This plugin replaces the little words Claude Code shows while it works — *Pondering…*,
-*Percolating…*, *Reticulating…* — with successive lines of whatever you're reading, and
-puts the same line in your status line, where it can turn pages during a turn.
+*Percolating…*, *Reticulating…* — with successive lines of whatever you're reading. The
+persistent reader is the line marked with a book icon below Claude Code's input box.
 
 ```
  ✻ Call me Ishmael.… (12s · esc to interrupt)
@@ -29,11 +29,11 @@ Run `/thinking-book:setup` without an argument to resume, or to see the syntax w
 book is queued. Setup asks no questions, offers no presets, and never retries a download.
 
 The first successful setup points to the optional one-time local controls. After that,
-books and page turns can avoid model turns entirely:
+books and manual page turns can stay entirely outside the Claude transcript:
 
 ```sh
 tb ~/Books/next.epub             # separate terminal: zero model tokens or conversation context
-!tb "Pride and Prejudice" # inside Claude Code: no model turn; output may enter later context
+tb "Pride and Prejudice"         # title search from a separate terminal
 ```
 
 Or start directly. The plugin detects Gutenberg searches, URLs, EPUB/text files, Kindle
@@ -49,6 +49,10 @@ status line, thinking-book leaves it alone and tells you to opt in with `/book p
 which runs both. Restart Claude Code once if a newly enabled status line is not visible.
 
 ## Reading
+
+Read from the line marked `📖` **below the input box**. The spinner is a secondary preview
+while Claude works; command output in the transcript is history, not the reading surface.
+At the default 250 WPM, pages turn automatically as Claude Code refreshes the status line.
 
 Plugin commands are namespaced, so they are `/thinking-book:n`, `/thinking-book:book`, and
 so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
@@ -77,8 +81,8 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 `/book display hud` adds a precomputed progress row above the prose:
 
 ```
-📖 Moby-Dick · ████░░░░░░ 124/310 (40%) · 250 wpm
-Call me Ishmael.
+Moby-Dick · ████░░░░░░ 124/310 (40%) · 250 wpm
+📖 Call me Ishmael.
 ```
 
 It is optional and off by default. Normal mode retains the original one-line display and
@@ -88,9 +92,9 @@ additional bounded lookup. It never starts Python or scans the book. Switch back
 `/book display line`, use only the live spinner with `/book display spinner`, or restore with
 `/book display off`.
 
-The HUD is display-only. The `/book` dashboard prints working in-app page controls. When
-`tb` is installed they are `!tb n` and `!tb b`; otherwise it shows the namespaced controls
-and the one-time `/book install-cli` shortcut.
+The HUD is display-only. The `/book` dashboard identifies the reading surface and explains
+the active page-turn mode. It does not steer timer-mode readers into shell commands that
+clutter the transcript.
 
 ## Local reading without spending a turn
 
@@ -104,10 +108,11 @@ noise threaded through your actual work. Install the local `tb` launcher once:
 | How | Cost |
 |---|---|
 | `tb <book>` in another terminal | **Literally zero model tokens and no conversation context.** Import and setup run locally. |
-| `!tb <book>` inside Claude Code | **No model turn.** Its short Bash transcript may accompany a later prompt. |
-| `!tb n` inside Claude Code | **No model turn.** A leading `!` is bash mode: it runs locally, and the input and output are recorded as `<bash-input>`/`<bash-stdout>` lines that are not treated as a user message. They do still sit in the conversation and go along with your next prompt. |
 | `tb n` in another terminal | **Nothing at all.** No turn, no context. |
 | `/thinking-book:n` | A full model turn. Works, but it is the expensive option. |
+
+Claude Code's `!` shell mode records its command and output in the transcript and may lead
+Claude to respond, as shown in real use. It is therefore not presented as a reading control.
 
 ### The reader pane
 
@@ -117,7 +122,7 @@ tb reader
 
 Run it in a split and you get the one-keypress page turn that is impossible inside Claude
 Code itself: **space** or `n` advances, `b` goes back, arrow keys work too, `r` redraws, `q` quits. It shows the line and
-your position, updates when something else moves the bookmark (timer mode, `!tb n`), and
+your position, updates when something else moves the bookmark (timer mode or `tb n`), and
 writes through to the same position file — so the spinner in the Claude pane follows along on
 its next turn. One bookmark, several windows.
 

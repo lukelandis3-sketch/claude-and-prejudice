@@ -384,7 +384,7 @@ def _hud_title(item_id, title, limit=38):
 
 def hud_line(item_id, title, offset, total):
     percent = (max(1, min(offset, total)) * 100) // max(1, total)
-    return "📖 %s · %s %d/%d (%d%%)" % (
+    return "%s · %s %d/%d (%d%%)" % (
         _hud_title(item_id, title), progress_bar(offset, total), offset, total, percent)
 
 

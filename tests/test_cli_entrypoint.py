@@ -1,4 +1,4 @@
-"""bin/tb -- the short entry point that makes `!tb n` and hotkeys practical."""
+"""bin/tb -- the short entry point for external-terminal controls and hotkeys."""
 
 import os
 import subprocess
@@ -30,7 +30,7 @@ class EntryPointTest(IsolatedStateCase):
         self.assertEqual(self.tbstate.read_pos(), 2)
 
     def test_short_aliases_work(self):
-        # The README promises `tb n` / `!tb n`; brevity is the entire point.
+        # The README promises `tb n`; brevity is the entire point.
         self.seed_stream(["one", "two", "three"], mode="manual")
         self.assertEqual(self.run_tb("n").stdout.strip(), "two")
         self.assertEqual(self.run_tb("n").stdout.strip(), "three")
@@ -92,7 +92,8 @@ class InstallCliTest(IsolatedStateCase):
         os.makedirs(target, exist_ok=True)
         result = self.run_cli("install-cli", target,
                               env={"PATH": target + os.pathsep + os.environ.get("PATH", "")})
-        self.assertIn("!tb n", result.stdout)
+        self.assertIn("another terminal", result.stdout)
+        self.assertNotIn("!tb n", result.stdout)
         self.assertNotIn("not on your PATH", result.stdout)
 
     def test_refuses_to_clobber_an_unrelated_file(self):

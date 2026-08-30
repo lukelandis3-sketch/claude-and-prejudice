@@ -113,10 +113,12 @@ class RoundTripTest(IsolatedStateCase):
         self.run_cli("load", self.book)
         dashboard = self.run_cli("", env={"PATH": ""})
         self.assertEqual(dashboard.returncode, 0, dashboard.stderr)
-        self.assertIn("📖 The Test Voyage", dashboard.stdout)
+        self.assertIn("Book: The Test Voyage", dashboard.stdout)
         self.assertIn("1/", dashboard.stdout)
-        self.assertIn("Next:", dashboard.stdout)
-        self.assertIn("install-cli", dashboard.stdout)
+        self.assertIn("Read below the input box.", dashboard.stdout)
+        self.assertIn("Pages turn automatically", dashboard.stdout)
+        self.assertNotIn("Next:", dashboard.stdout)
+        self.assertNotIn("!tb n", dashboard.stdout)
         self.assertIn("/book help", dashboard.stdout)
         self.assertNotIn("All commands:", dashboard.stdout)
         self.assertNotIn("thinking-book 0.", dashboard.stdout)
@@ -131,6 +133,7 @@ class RoundTripTest(IsolatedStateCase):
             fh.write("#!/bin/sh\necho unrelated\n")
         os.chmod(fake_tb, 0o755)
         self.run_cli("load", self.book)
+        self.run_cli("mode", "manual")
 
         dashboard = self.run_cli("", env={"PATH": fake_bin})
         self.assertIn("install-cli", dashboard.stdout)
@@ -644,7 +647,18 @@ class RoundTripTest(IsolatedStateCase):
         self.run_cli("off")
         dashboard = self.run_cli("")
         self.assertIn("off — /book on", dashboard.stdout)
+        self.assertIn("Reading surface is off.", dashboard.stdout)
+        self.assertNotIn("Read below the input box.", dashboard.stdout)
         self.assertNotIn("Pause: /book pause", dashboard.stdout)
+
+    def test_dashboard_names_the_spinner_when_the_status_line_is_off(self):
+        self.run_cli("load", self.book)
+        self.run_cli("display", "spinner")
+
+        dashboard = self.run_cli("")
+
+        self.assertIn("Read on the live spinner while Claude works.", dashboard.stdout)
+        self.assertNotIn("Read below the input box.", dashboard.stdout)
 
     def test_empty_states_use_the_direct_book_shorthand(self):
         for command in ((), ("next",), ("sync",)):
@@ -754,7 +768,7 @@ class RoundTripTest(IsolatedStateCase):
 
         status = self.run_cli("status")
         self.assertEqual(status.returncode, 0, status.stderr)
-        self.assertIn("📖 Beta", status.stdout)
+        self.assertIn("Book: Beta", status.stdout)
         self.assertIn("2/3 (66%)", status.stdout)
         self.assertIn("book 2/2", status.stdout)
         self.assertNotIn("line 4 of 5", status.stdout)
