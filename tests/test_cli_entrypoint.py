@@ -45,6 +45,19 @@ class EntryPointTest(IsolatedStateCase):
         self.assertIn("book <title|url|file>", result.stdout)
         self.assertNotIn("/thinking-book:book", result.stdout)
 
+    def test_local_errors_never_recommend_plugin_only_commands(self):
+        result = self.run_book("add")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("book add <title|url|file>", result.stderr)
+        self.assertNotIn("/thinking-book", result.stderr)
+
+    def test_local_manual_dashboard_uses_the_launcher_already_running(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        result = self.run_book("status", env={"PATH": "/usr/bin:/bin"})
+        self.assertIn("book next", result.stdout)
+        self.assertIn("book back", result.stdout)
+        self.assertNotIn("install-cli", result.stdout)
+
     def test_works_through_a_symlink_from_another_directory(self):
         # This is how it lands on PATH, so it must resolve its own location.
         link_dir = os.path.join(self.config_dir, "bin")

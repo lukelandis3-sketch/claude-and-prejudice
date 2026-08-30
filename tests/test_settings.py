@@ -143,6 +143,7 @@ class SettingsTest(IsolatedStateCase):
         self.tbsettings.set_spinner_line("Hold this line.")
         self.tbsettings.clear_spinner()
         self.assertEqual(self.read_settings()["spinnerVerbs"], custom)
+
         self.assertFalse(os.path.exists(self.tbsettings.backup_path()))
 
     def test_legacy_backup_is_used_per_key_not_per_first_v04_write(self):
@@ -194,6 +195,56 @@ class SettingsTest(IsolatedStateCase):
         self.tbsettings.clear_spinner()
         self.assertEqual(self.read_settings()["spinnerVerbs"], custom)
 
+    def test_resync_adopts_a_newer_user_spinner_as_the_restore_target(self):
+        original = {"mode": "append", "verbs": ["Original"]}
+        newer = {"mode": "append", "verbs": ["New user setting"]}
+        self.write_settings({"spinnerVerbs": original})
+        self.tbsettings.set_spinner_line("Our first line")
+        settings = self.read_settings()
+        settings["spinnerVerbs"] = newer
+        self.write_settings(settings)
+
+        self.tbsettings.set_spinner_line("Our next line")
+        self.tbsettings.clear_spinner()
+
+        self.assertEqual(self.read_settings()["spinnerVerbs"], newer)
+
+    def test_rewrap_adopts_a_newer_statusline_as_the_restore_target(self):
+        newer = {
+            "type": "command", "command": "new-status --compact",
+            "padding": 4, "futureOption": {"keep": True},
+        }
+        self.tbsettings.set_statusline("ours-v1")
+        self.write_settings({"statusLine": newer})
+
+        enabled, wrapped, _settings, _changed = self.tbsettings.install_statusline(
+            "ours-v2", lambda entry: "ours" in entry.get("command", ""), auto=False)
+        self.assertTrue(enabled)
+        self.assertEqual(wrapped, newer)
+        self.tbsettings.restore_statusline(wrapped)
+
+        self.assertEqual(self.read_settings()["statusLine"], newer)
+
+    def test_concurrent_external_write_is_merged_before_our_update(self):
+        self.write_settings({"theme": "old"})
+        calls = {"count": 0}
+
+        def mutate(settings):
+            calls["count"] += 1
+            settings["spinnerVerbs"] = {"mode": "replace", "verbs": ["ours"]}
+            if calls["count"] == 1:
+                self.write_settings({"theme": "new", "concurrent": True})
+
+        self.tbsettings.update(
+            mutate, touched=(self.tbsettings.SPINNER_KEY,),
+            record_key=self.tbsettings.SPINNER_KEY)
+
+        self.assertGreaterEqual(calls["count"], 2)
+        self.assertEqual(self.read_settings()["theme"], "new")
+        self.assertTrue(self.read_settings()["concurrent"])
+        self.assertEqual(
+            self.read_settings()["spinnerVerbs"]["verbs"], ["ours"])
+
     def test_one_session_ending_cannot_clear_another_sessions_spinner(self):
         original = {"mode": "append", "verbs": ["Pondering"]}
         self.write_settings({"spinnerVerbs": original})
@@ -208,6 +259,22 @@ class SettingsTest(IsolatedStateCase):
             self.read_settings()["spinnerVerbs"]["verbs"], ["Session B line"])
 
         with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "session-b"}):
+            self.tbsettings.clear_spinner(session_only=True)
+        self.assertEqual(self.read_settings()["spinnerVerbs"], original)
+
+    def test_latest_session_can_end_first_without_clearing_an_older_session(self):
+        original = {"mode": "append", "verbs": ["Pondering"]}
+        self.write_settings({"spinnerVerbs": original})
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "session-a"}):
+            self.tbsettings.set_spinner_line("Session A line")
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "session-b"}):
+            self.tbsettings.set_spinner_line("Session B line")
+            self.tbsettings.clear_spinner(session_only=True)
+
+        self.assertEqual(
+            self.read_settings()["spinnerVerbs"]["verbs"], ["Session B line"])
+
+        with mock.patch.dict(os.environ, {"CLAUDE_CODE_SESSION_ID": "session-a"}):
             self.tbsettings.clear_spinner(session_only=True)
         self.assertEqual(self.read_settings()["spinnerVerbs"], original)
 

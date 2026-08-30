@@ -304,8 +304,7 @@ def _run_import(handler, args, activate):
 def cmd_add(args, activate=True):
     """One front door: URL, supported local file/export, or Gutenberg search."""
     if not args:
-        raise SystemExit("usage: %s; guided setup: /thinking-book:setup"
-                         % book_command("add <title|url|file>"))
+        raise SystemExit("usage: %s" % book_command("add <title|url|file>"))
     target = " ".join(args).strip()
     if re.match(r"^https?://", target, re.I):
         return _run_import(cmd_read, [target], activate)
@@ -368,9 +367,10 @@ def cmd_start(args):
     author = meta.get("author") if isinstance(meta, dict) else None
     label = "%s by %s" % (title, author) if author else title
 
+    statusline_reason = ""
     try:
         if args:
-            enabled, _reason = enable_statusline(auto=True)
+            enabled, statusline_reason = enable_statusline(auto=True)
             config = tbstate.update_config(lambda live: live.update({
                 "mode": "timer",
                 "words_per_minute": 250,
@@ -391,16 +391,20 @@ def cmd_start(args):
         raise SystemExit("%s: %s" % (message, exc))
 
     surfaces = config["surfaces"]
-    display = ("HUD + spinner" if config.get("hud") and surfaces["statusline"]
-               else "line + spinner" if surfaces["statusline"]
-               else "spinner" if surfaces["spinner"] else "off")
     pace = "250 WPM" if args else _pace_label(config)
     extra = " (+%d more)" % (len(written) - 1) if len(written) > 1 else ""
-    print("Ready — %s%s · %s · %s" % (label, extra, display, pace))
-    controls = _controls_hint(config)
-    if not surfaces["statusline"] and args:
-        controls += " · HUD skipped: %s" % book_command("display hud")
-    print(controls)
+    print("Ready — %s%s · %s" % (label, extra, pace))
+    if surfaces["statusline"]:
+        location = "📖 Read below the input box"
+        if statusline_reason == "enabled":
+            location += " (restart Claude once if missing)"
+    elif surfaces["spinner"]:
+        location = "Read on the live spinner"
+        if args:
+            location += " · Add 📖 line: %s" % book_command("display hud")
+    else:
+        location = "Reading display is off"
+    print("%s · %s" % (location, _controls_hint(config)))
 
 
 def cmd_source(args):
@@ -906,6 +910,9 @@ def _controls_hint(config):
     if config["mode"] == "turn":
         return "Page turns after each response"
 
+    launcher = os.environ.get("THINKING_BOOK_COMMAND")
+    if launcher in ("book", "tb"):
+        return "Manual controls: %s next · %s back" % (launcher, launcher)
     import shutil
     short_book = shutil.which("book")
     bundled_book = os.path.join(plugin_root(), "bin", "book")
@@ -1508,11 +1515,9 @@ def _command_suggestion(argv):
 
 def _print_unknown(name):
     """Keep the stale-checkout diagnostic for inputs that cannot be book sources."""
-    print("unknown command %r -- thinking-book %s running from %s"
-          % (name, version(), plugin_root()), file=sys.stderr)
-    print("known commands: %s" % ", ".join(sorted(COMMANDS)), file=sys.stderr)
-    print("if you expected this command, that checkout may be behind: "
-          "git pull in the directory above, then restart Claude Code.", file=sys.stderr)
+    print("Unknown command %r. Try %s." % (name, book_command("help")), file=sys.stderr)
+    print("thinking-book %s · %s · update: git pull, then restart Claude Code"
+          % (version(), plugin_root()), file=sys.stderr)
 
 
 def main(argv):
@@ -1541,9 +1546,10 @@ def main(argv):
         suggestion = _command_suggestion(argv)
         if suggestion:
             if tbstate.load_queue()["items"]:
-                escape = "add %s, then open %s" % (name, name)
+                escape = "%s, then %s" % (
+                    book_command("add %s" % name), book_command("open %s" % name))
             else:
-                escape = "start %s" % name
+                escape = book_command("start %s" % name)
             print("Did you mean %r? To read a book called %s: %s"
                   % (suggestion, name, escape), file=sys.stderr)
             return 2

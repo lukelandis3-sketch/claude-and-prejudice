@@ -1,6 +1,7 @@
 ---
 description: Go back one line of the book
 allowed-tools: Bash(python3:*)
+disable-model-invocation: true
 ---
 
 !`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/thinking_book.py" back "$ARGUMENTS"`

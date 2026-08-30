@@ -17,16 +17,16 @@ persistent reader is the line marked with a book icon below Claude Code's input 
 /plugin install thinking-book
 ```
 
-Start with your own title, URL, or file in one command. HUD, spinner, and 250 WPM are
-configured automatically:
+Start with your own title, URL, or file in one command. The first book automatically
+enables the reader at 250 WPM:
 
 ```
-/thinking-book:setup moby dick
-/thinking-book:setup ~/Books/my-book.epub
+/thinking-book:book moby dick
+/thinking-book:book ~/Books/my-book.epub
 ```
 
-Run `/thinking-book:setup` without an argument to resume, or to see the syntax when no
-book is queued. Setup asks no questions, offers no presets, and never retries a download.
+`/thinking-book:setup` is only for resetting an existing reader to the recommended HUD,
+spinner, and 250 WPM defaults. It asks no questions and never retries a download.
 
 For library management and manual controls outside Claude, install the optional local
 launcher once. Books and page turns can then stay entirely outside the transcript:
@@ -62,7 +62,7 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 |---|---|
 | `/thinking-book:n` | Turn the page — advance one line |
 | `/thinking-book:b` | Back one line |
-| `/thinking-book:setup <book>` | Start your book with HUD, spinner, and 250 WPM |
+| `/thinking-book:setup <book>` | Reset reading to HUD, spinner, and 250 WPM defaults |
 | `/thinking-book:book` | Compact reading dashboard and controls |
 | `/thinking-book:book status` | Dashboard plus display details and the whole queue |
 | `/thinking-book:book queue` | A numbered library with each book's bookmark |
@@ -115,6 +115,9 @@ noise threaded through your actual work. Install the local `book` launcher once:
 Claude Code's `!` shell mode records its command and output in the transcript and may lead
 Claude to respond, as shown in real use. It is therefore not presented as a reading control.
 The old `tb` command remains a compatibility alias for existing installs and hotkeys.
+
+The plugin commands are user-invocable only: their descriptions are not injected into
+Claude's always-on model context. Merely installing Claude & Prejudice costs no model tokens.
 
 ### The reader pane
 

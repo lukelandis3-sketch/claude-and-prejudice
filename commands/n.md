@@ -1,6 +1,7 @@
 ---
-description: Turn the page — advance one line of the book
+description: Read the next passage
 allowed-tools: Bash(python3:*)
+disable-model-invocation: true
 ---
 
 !`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/thinking_book.py" next "$ARGUMENTS"`

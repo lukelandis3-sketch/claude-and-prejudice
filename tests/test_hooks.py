@@ -349,6 +349,16 @@ class HookTest(IsolatedStateCase):
         self.assertNotIn("settings.json", source)
         self.assertIn("!`python3", source)
 
+    def test_commands_are_user_invocable_only_and_cost_no_always_on_context(self):
+        command_dir = os.path.join(support.REPO, "commands")
+        names = sorted(name for name in os.listdir(command_dir) if name.endswith(".md"))
+        self.assertEqual(names, ["b.md", "book.md", "n.md", "setup.md"])
+        for name in names:
+            with self.subTest(name=name):
+                with open(os.path.join(command_dir, name)) as fh:
+                    frontmatter = fh.read().split("---", 2)[1]
+                self.assertIn("disable-model-invocation: true", frontmatter)
+
     def test_help_command_prints_task_oriented_help(self):
         result = self.run_cli("help")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -393,7 +403,7 @@ class HookTest(IsolatedStateCase):
         self.assertIn("thinking-book", result.stderr)
         self.assertIn(support.REPO, result.stderr)
         self.assertIn("git pull", result.stderr)
-        self.assertIn("repair", result.stderr)  # the real command is listed
+        self.assertIn("/thinking-book:book help", result.stderr)
 
     def test_arguments_arriving_as_one_blob_are_split(self):
         # Slash commands pass "$ARGUMENTS" as a single quoted argument.

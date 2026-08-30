@@ -1,7 +1,8 @@
 ---
-description: Manage the book you are reading in the margins of Claude Code
+description: Read or manage books
 argument-hint: <title|url|file> | status | pause | queue | more...
 allowed-tools: Bash(python3:*)
+disable-model-invocation: true
 ---
 
 !`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/thinking_book.py" "$ARGUMENTS"`

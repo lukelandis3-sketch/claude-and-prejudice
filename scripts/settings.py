@@ -16,7 +16,8 @@ import tbstate
 SPINNER_KEY = "spinnerVerbs"
 STATUSLINE_KEY = "statusLine"
 _MISSING = object()
-_WRITTEN_RECORD_VERSION = 1
+_WRITTEN_RECORD_VERSION = 2
+_UPDATE_RETRIES = 8
 
 
 class SettingsError(ValueError):
@@ -57,13 +58,9 @@ def ensure_settings_file():
     return True
 
 
-def read_settings():
+def _decode_settings(raw):
+    """Parse bytes already read from settings.json so mutation can detect races."""
     target = tbstate.settings_path()
-    try:
-        with open(target, "rb") as fh:
-            raw = fh.read()
-    except OSError:
-        return {}
     try:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as exc:
@@ -76,6 +73,15 @@ def read_settings():
             "%s must contain a JSON object; thinking-book left it unchanged." % target
         )
     return value
+
+
+def read_settings():
+    target = tbstate.settings_path()
+    try:
+        with open(target, "rb") as fh:
+            return _decode_settings(fh.read())
+    except OSError:
+        return {}
 
 
 def _backup_once(settings):
@@ -199,19 +205,26 @@ def _session_id():
 def _written_record(key):
     written = tbstate.read_json(written_path(), {})
     record = written.get(key, _MISSING) if isinstance(written, dict) else _MISSING
-    if (isinstance(record, dict)
-            and record.get("record_version") == _WRITTEN_RECORD_VERSION
-            and "value" in record):
-        return record.get("value"), record.get("owner")
-    return record, None
+    if isinstance(record, dict) and "value" in record:
+        if record.get("record_version") == _WRITTEN_RECORD_VERSION:
+            owners = record.get("owners")
+            owners = owners if isinstance(owners, list) else []
+            return record.get("value"), {
+                owner for owner in owners if isinstance(owner, str) and owner}
+        if record.get("record_version") == 1:
+            owner = record.get("owner")
+            return record.get("value"), {owner} if owner else set()
+    return record, set()
 
 
 def _record_written(key, value):
     written = tbstate.read_json(written_path(), {})
     written = written if isinstance(written, dict) else {}
+    _previous_value, owners = _written_record(key)
+    owners.add(_session_id())
     record = {
         "record_version": _WRITTEN_RECORD_VERSION,
-        "owner": _session_id(),
+        "owners": sorted(owners),
         "value": value,
     }
     if written.get(key, _MISSING) == record:
@@ -224,8 +237,24 @@ def _last_written(key):
     return _written_record(key)[0]
 
 
-def _last_writer(key):
+def _active_writers(key):
     return _written_record(key)[1]
+
+
+def _release_writer(key, owner):
+    """Release one session while retaining other sessions' claim on the live value."""
+    written = tbstate.read_json(written_path(), {})
+    written = written if isinstance(written, dict) else {}
+    value, owners = _written_record(key)
+    owners.discard(owner)
+    if value is _MISSING:
+        return
+    written[key] = {
+        "record_version": _WRITTEN_RECORD_VERSION,
+        "owners": sorted(owners),
+        "value": value,
+    }
+    tbstate.write_json(written_path(), written)
 
 
 def _owns_key(key):
@@ -245,30 +274,50 @@ def update(mutator, touched=(), record_key=None, retire=(), origin_records=None)
     with tbstate.locked("settings.lock"):
         ensure_settings_file()
         _initialize_legacy_pending()
-        settings = read_settings()
-        before = json.loads(json.dumps(settings))
-        mutator(settings)
-        retire_keys = retire() if callable(retire) else retire
-        if settings == before:
-            # A second session may claim an unchanged value. Recording that owner keeps
-            # the first session's SessionEnd from clearing the active session's spinner.
-            if (record_key is not None and record_key in settings
-                    and _owns_key(record_key)):
+        for _attempt in range(_UPDATE_RETRIES):
+            with open(tbstate.settings_path(), "rb") as fh:
+                raw = fh.read()
+            settings = _decode_settings(raw)
+            before = json.loads(json.dumps(settings))
+            mutator(settings)
+            retire_keys = retire() if callable(retire) else retire
+
+            with open(tbstate.settings_path(), "rb") as fh:
+                if fh.read() != raw:
+                    continue
+
+            adopt_external = False
+            if (record_key is not None and _owns_key(record_key)
+                    and not (origin_records and record_key in origin_records)):
+                last_written = _last_written(record_key)
+                live = before.get(record_key, _MISSING)
+                adopt_external = (last_written is not _MISSING
+                                  and live != last_written)
+                if adopt_external:
+                    _retire((record_key,))
+
+            if settings == before:
+                # A second session may claim an unchanged value. Recording all owners
+                # keeps either SessionEnd order from clearing another active session.
+                if (record_key is not None and record_key in settings
+                        and _owns_key(record_key) and not adopt_external):
+                    _record_written(record_key, settings[record_key])
+                if retire_keys:
+                    _retire(retire_keys)
+                return settings, False
+
+            _raw_backup_once(raw)
+            _backup_once(before)
+            _remember_origins(before, touched, origin_records)
+            tbstate.write_json(tbstate.settings_path(), settings)
+            if record_key is not None:
                 _record_written(record_key, settings[record_key])
             if retire_keys:
                 _retire(retire_keys)
-            return settings, False
-        with open(tbstate.settings_path(), "rb") as fh:
-            raw = fh.read()
-        _raw_backup_once(raw)
-        _backup_once(before)
-        _remember_origins(before, touched, origin_records)
-        tbstate.write_json(tbstate.settings_path(), settings)
-        if record_key is not None:
-            _record_written(record_key, settings[record_key])
-        if retire_keys:
-            _retire(retire_keys)
-        return settings, True
+            return settings, True
+        raise SettingsError(
+            "%s changed repeatedly while thinking-book was updating it; nothing was "
+            "overwritten. Try again." % tbstate.settings_path())
 
 
 def set_spinner_line(line):
@@ -305,14 +354,19 @@ def clear_spinner(session_only=False):
         live = settings.get(SPINNER_KEY, _MISSING)
         if not owned:
             return
-        writer = _last_writer(SPINNER_KEY)
-        if session_only and writer is not None and writer != _session_id():
-            return
         if live is _MISSING or (last_written is not _MISSING and live != last_written):
             # A user edit is now the baseline for the next activation. Retire our stale
             # ownership without touching the live value.
             outcome["retire"] = True
             return
+        if session_only:
+            owner = _session_id()
+            writers = _active_writers(SPINNER_KEY)
+            if owner not in writers:
+                return
+            if writers - {owner}:
+                _release_writer(SPINNER_KEY, owner)
+                return
         if original is not _MISSING:
             settings[SPINNER_KEY] = original
         else:

@@ -222,7 +222,15 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(result, 2)
         self.assertEqual(calls, [])
         self.assertIn("Did you mean 'status'?", stderr.getvalue())
-        self.assertIn("start statsu", stderr.getvalue())
+        self.assertIn("/thinking-book:book start statsu", stderr.getvalue())
+
+    def test_unknown_command_hides_internal_hook_commands(self):
+        result = self.run_cli("--nonsense")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("/thinking-book:book help", result.stderr)
+        for internal in ("sync", "advance", "restore", "refresh-feeds"):
+            self.assertNotIn(internal, result.stderr)
+        self.assertLessEqual(len(result.stderr.strip().splitlines()), 2)
 
     def test_explicit_command_still_wins_over_a_title_collision(self):
         import thinking_book
@@ -241,7 +249,7 @@ class RoundTripTest(IsolatedStateCase):
     def test_flag_shaped_unknown_keeps_the_local_unknown_command_error(self):
         result = self.run_cli("--details")
         self.assertEqual(result.returncode, 2)
-        self.assertIn("unknown command", result.stderr)
+        self.assertIn("Unknown command", result.stderr)
 
     def test_hyphens_in_urls_are_not_mistaken_for_command_names(self):
         import thinking_book
@@ -315,8 +323,9 @@ class RoundTripTest(IsolatedStateCase):
         with contextlib.redirect_stderr(stderr):
             result = thinking_book.main(["statsu"])
         self.assertEqual(result, 2)
-        self.assertIn("add statsu, then open statsu", stderr.getvalue())
-        self.assertNotIn("start statsu", stderr.getvalue())
+        self.assertIn("/thinking-book:book add statsu", stderr.getvalue())
+        self.assertIn("/thinking-book:book open statsu", stderr.getvalue())
+        self.assertNotIn("/thinking-book:book start statsu", stderr.getvalue())
 
     def test_add_accepts_a_percent_encoded_file_url(self):
         path = os.path.join(self.config_dir, "a book.txt")
@@ -379,6 +388,8 @@ class RoundTripTest(IsolatedStateCase):
         self.assertLessEqual(len(result.stdout.splitlines()), 2, result.stdout)
         self.assertIn("The Test Voyage", result.stdout)
         self.assertIn("250 WPM", result.stdout)
+        self.assertIn("📖 Read below the input box", result.stdout)
+        self.assertNotIn("HUD + spinner", result.stdout)
         config = self.tbstate.load_config()
         self.assertEqual(config["mode"], "timer")
         self.assertEqual(config["words_per_minute"], 250)
