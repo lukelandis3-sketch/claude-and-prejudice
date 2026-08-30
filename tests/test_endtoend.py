@@ -1,5 +1,7 @@
 """Full round trip: import a real EPUB, read through it, then turn the plugin off."""
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -142,6 +144,175 @@ class RoundTripTest(IsolatedStateCase):
         result = self.run_cli("add " + path)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("short story", result.stdout)
+
+    def test_bare_source_sets_up_the_first_book(self):
+        result = self.run_cli(self.book)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("The Test Voyage", result.stdout)
+        config = self.tbstate.load_config()
+        self.assertEqual(config["mode"], "timer")
+        self.assertEqual(config["words_per_minute"], 250)
+        self.assertEqual(config["surfaces"], {"statusline": True, "spinner": True})
+
+    def test_bare_source_opens_another_book_without_changing_preferences(self):
+        self.run_cli("start", self.book)
+        self.run_cli("mode", "manual")
+        self.run_cli("pace", "333")
+        self.run_cli("display", "spinner")
+        self.run_cli("pause")
+        before = self.tbstate.load_config()
+        other = os.path.join(self.config_dir, "second book.txt")
+        with open(other, "w") as fh:
+            fh.write("This is the second book, selected without resetting preferences.")
+
+        result = self.run_cli(other)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Opened second book", result.stdout)
+        self.assertEqual(self.tbstate.load_config(), before)
+        self.assertEqual(self.tbstate.item_at(self.tbstate.read_pos())[3], "second book")
+
+    def test_bare_title_preserves_the_whole_slash_command_argument_blob(self):
+        import thinking_book
+        calls = []
+        original = thinking_book.cmd_gutenberg
+        thinking_book.cmd_gutenberg = lambda args, activate=True: (
+            calls.append((args, activate)) or ["fake-book"])
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                thinking_book.main(["Moby Dick"])
+        finally:
+            thinking_book.cmd_gutenberg = original
+        self.assertEqual(calls, [(["Moby Dick"], False)])
+
+    def test_one_word_title_is_an_implicit_source(self):
+        import thinking_book
+        calls = []
+        original = thinking_book.cmd_gutenberg
+
+        def fail(args, activate=True):
+            calls.append((args, activate))
+            raise LookupError("fixture stops after routing")
+
+        thinking_book.cmd_gutenberg = fail
+        try:
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                result = thinking_book.main(["Dracula"])
+        finally:
+            thinking_book.cmd_gutenberg = original
+        self.assertEqual(result, 1)
+        self.assertEqual(calls, [(["Dracula"], False)])
+
+    def test_probable_command_typo_does_not_search_for_a_book(self):
+        import thinking_book
+        calls = []
+        original = thinking_book.cmd_gutenberg
+        thinking_book.cmd_gutenberg = lambda *args, **kwargs: calls.append(args)
+        try:
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                result = thinking_book.main(["statsu"])
+        finally:
+            thinking_book.cmd_gutenberg = original
+        self.assertEqual(result, 2)
+        self.assertEqual(calls, [])
+        self.assertIn("Did you mean 'status'?", stderr.getvalue())
+        self.assertIn("start statsu", stderr.getvalue())
+
+    def test_explicit_command_still_wins_over_a_title_collision(self):
+        import thinking_book
+        calls = []
+        original = thinking_book.cmd_gutenberg
+        thinking_book.cmd_gutenberg = lambda *args, **kwargs: calls.append(args)
+        try:
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                result = thinking_book.main(["status", "Anxiety"])
+        finally:
+            thinking_book.cmd_gutenberg = original
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, [])
+
+    def test_flag_shaped_unknown_keeps_the_local_unknown_command_error(self):
+        result = self.run_cli("--details")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unknown command", result.stderr)
+
+    def test_hyphens_in_urls_are_not_mistaken_for_command_names(self):
+        import thinking_book
+        calls = []
+        original = thinking_book.cmd_read
+
+        def fail(args, activate=True):
+            calls.append((args, activate))
+            raise LookupError("fixture stops after routing")
+
+        thinking_book.cmd_read = fail
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                result = thinking_book.main(["https://example.test/my-book"])
+        finally:
+            thinking_book.cmd_read = original
+        self.assertEqual(result, 1)
+        self.assertEqual(calls, [(["https://example.test/my-book"], False)])
+
+    def test_quoted_implicit_file_path_with_spaces_is_imported_locally(self):
+        import thinking_book
+        directory = os.path.join(self.config_dir, "My Books")
+        os.makedirs(directory)
+        path = os.path.join(directory, "quoted book.txt")
+        with open(path, "w") as fh:
+            fh.write("A local book should never become a network title search.")
+        calls = []
+        original = thinking_book.cmd_gutenberg
+        thinking_book.cmd_gutenberg = lambda *args, **kwargs: calls.append(args)
+        try:
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                result = thinking_book.main(['"%s"' % path])
+        finally:
+            thinking_book.cmd_gutenberg = original
+        self.assertEqual(result, 0)
+        self.assertEqual(calls, [])
+        self.assertIn("quoted book", stdout.getvalue())
+
+    def test_implicit_import_while_off_explains_how_to_resume(self):
+        self.run_cli("start", self.book)
+        self.run_cli("off")
+        other = os.path.join(self.config_dir, "quiet.txt")
+        with open(other, "w") as fh:
+            fh.write("This book imports while every reading surface is off.")
+        result = self.run_cli(other)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("thinking-book is off", result.stdout)
+        self.assertIn("/book on", result.stdout)
+
+    def test_corrupt_queue_does_not_make_implicit_import_reset_preferences(self):
+        self.run_cli("start", self.book)
+        self.run_cli("mode", "manual")
+        self.run_cli("pace", "333")
+        self.run_cli("display", "spinner")
+        before = self.tbstate.load_config()
+        with open(self.tbstate.path("queue.json"), "w") as fh:
+            fh.write("{ broken")
+        other = os.path.join(self.config_dir, "recovery.txt")
+        with open(other, "w") as fh:
+            fh.write("A safe recovery import must not reset reading preferences.")
+        result = self.run_cli(other)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tbstate.load_config(), before)
+        self.assertEqual(len(self.tbstate.load_queue()["items"]), 2)
+
+    def test_typo_escape_hatch_does_not_recommend_resetting_existing_preferences(self):
+        import thinking_book
+        self.seed_stream(["one"], mode="manual", wpm=333)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            result = thinking_book.main(["statsu"])
+        self.assertEqual(result, 2)
+        self.assertIn("add statsu, then open statsu", stderr.getvalue())
+        self.assertNotIn("start statsu", stderr.getvalue())
 
     def test_add_accepts_a_percent_encoded_file_url(self):
         path = os.path.join(self.config_dir, "a book.txt")

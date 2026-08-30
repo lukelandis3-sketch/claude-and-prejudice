@@ -290,7 +290,7 @@ class HookTest(IsolatedStateCase):
         self.assertEqual(os.stat(self.tbstate.settings_path()).st_ino, before)
 
     def test_unknown_command_is_an_error_not_a_crash(self):
-        result = self.run_cli("nonsense")
+        result = self.run_cli("statsu")
         self.assertEqual(result.returncode, 2)
 
     def test_unknown_command_names_the_version_and_path_it_ran_from(self):

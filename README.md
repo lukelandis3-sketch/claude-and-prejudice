@@ -32,16 +32,16 @@ The first successful setup points to the optional one-time CLI installer. After 
 starting another book can be entirely local:
 
 ```sh
-tb start ~/Books/next.epub       # separate terminal: zero model tokens or conversation context
-!tb start "Pride and Prejudice" # inside Claude Code: no model turn; output may enter later context
+tb ~/Books/next.epub             # separate terminal: zero model tokens or conversation context
+!tb "Pride and Prejudice" # inside Claude Code: no model turn; output may enter later context
 ```
 
 Or start directly. The plugin detects Gutenberg searches, URLs, EPUB/text files, Kindle
 clippings, Readwise exports, and Libby exports:
 
 ```
-/book add moby dick
-/book add ~/Books/my-book.epub
+/book moby dick
+/book ~/Books/my-book.epub
 ```
 
 The first import enables an empty status-line slot automatically. If you already have a
@@ -103,8 +103,8 @@ noise threaded through your actual work. Install the local `tb` launcher once:
 
 | How | Cost |
 |---|---|
-| `tb start <book>` in another terminal | **Literally zero model tokens and no conversation context.** Import and setup run locally. |
-| `!tb start <book>` inside Claude Code | **No model turn.** Its short Bash transcript may accompany a later prompt. |
+| `tb <book>` in another terminal | **Literally zero model tokens and no conversation context.** Import and setup run locally. |
+| `!tb <book>` inside Claude Code | **No model turn.** Its short Bash transcript may accompany a later prompt. |
 | `!tb n` inside Claude Code | **No model turn.** A leading `!` is bash mode: it runs locally, and the input and output are recorded as `<bash-input>`/`<bash-stdout>` lines that are not treated as a user message. They do still sit in the conversation and go along with your next prompt. |
 | `tb n` in another terminal | **Nothing at all.** No turn, no context. |
 | `/thinking-book:n` | A full model turn. Works, but it is the expensive option. |
@@ -170,7 +170,8 @@ start a new book through setup.
 
 | Command | Source | Gives you |
 |---|---|---|
-| `/book add <title\|url\|file>` | Auto-detected source | Books, articles, or exported highlights |
+| `/book <title\|url\|file>` | Auto-detected source | Books, articles, or highlights, opened immediately |
+| `/book add <title\|url\|file>` | Auto-detected source | Books, articles, or highlights, queued for later |
 | `/book feed add <url>` | An RSS or Atom feed | New articles, queued automatically |
 
 Items form a queue and are read in order; when one runs out the next begins. Feeds top the
@@ -286,8 +287,8 @@ Installing from a directory source means the plugin runs straight out of your gi
 so it does not update itself — `git pull` in that directory *is* the update, followed by a
 restart if `hooks/hooks.json` changed.
 
-If a command errors with `unknown command`, that is the signal: the error names the version
-and the directory it ran from, so compare it against `/book version` and this README.
+If a command-shaped typo errors with `unknown command`, the message names the version and
+directory it ran from. Compare those against `/book version` and this README.
 
 ## Development
 

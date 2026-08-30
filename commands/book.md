@@ -1,6 +1,6 @@
 ---
 description: Manage the book you are reading in the margins of Claude Code
-argument-hint: add <title|url|file> | pace <wpm> | open <book> | display <mode> | help
+argument-hint: <title|url|file> | status | pause | queue | more...
 allowed-tools: Bash(python3:*)
 ---
 

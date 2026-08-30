@@ -325,16 +325,21 @@ def cmd_add(args, activate=True):
     return _run_import(cmd_gutenberg, [target], activate)
 
 
+def _quiet_add(args):
+    """Import through the unified router while replacing source-specific chatter."""
+    import contextlib
+    import io
+    with contextlib.redirect_stdout(io.StringIO()):
+        return cmd_add(args, activate=False)
+
+
 def cmd_start(args):
     """Import an optional book and apply the recommended setup in one quiet command."""
     written = []
     if args:
-        import contextlib
-        import io
         # Source-specific commands are useful interactively but noisy in onboarding.
         # Preserve their errors while replacing success chatter with one stable result.
-        with contextlib.redirect_stdout(io.StringIO()):
-            written = cmd_add(args, activate=False)
+        written = _quiet_add(args)
         if written:
             offset = tbstate.load_bookmarks().get(written[0], 1)
             position = tbstate.resolve_position(written[0], offset)
@@ -385,6 +390,32 @@ def cmd_start(args):
         print("Next: /thinking-book:n · Local controls: /thinking-book:book install-cli")
     elif args:
         print("HUD skipped: your status line is in use. /thinking-book:book pane on adds it.")
+
+
+def cmd_source(args):
+    """Read a title, URL, or file without making the user name an import command."""
+    queued = tbstate.load_queue()["items"]
+    if not queued and not tbstate.load_index():
+        return cmd_start(args)
+
+    # A valid stream index can recover a crash-truncated queue without treating an
+    # established reader as a first run and resetting their preferences.
+    if not queued:
+        with tbstate.locked():
+            queued = list(dict.fromkeys(row[1] for row in tbstate.load_index()))
+            if queued and not tbstate.load_queue()["items"]:
+                tbstate.save_queue({"items": queued})
+
+    written = _quiet_add(args)
+    if not written:
+        raise SystemExit("No readable books were imported.")
+    cmd_open([written[0]])
+    config = tbstate.load_config()
+    if config["paused"] and not any(config["surfaces"].values()):
+        print("thinking-book is off; run /book on when you want to start reading.")
+    if len(written) > 1:
+        print("Queued %d more book%s." % (
+            len(written) - 1, "" if len(written) == 2 else "s"))
 
 
 # --------------------------------------------------------------------------- feeds
@@ -1176,7 +1207,8 @@ def cmd_version(_args):
 
 
 def print_help():
-    print("Read something now: /book add <title|url|file>")
+    print("Read something now: /book <title|url|file>")
+    print("Queue without switching: /book add <title|url|file>")
     print("Read: /book status · /book pause|resume · /book next|back [line count]")
     print("Pace: /book pace <wpm> · fixed seconds: /book dwell <seconds> · mode timer|turn|manual")
     print("Display: /book display hud|line|spinner|off · guided setup: /thinking-book:setup")
@@ -1314,16 +1346,19 @@ def _normalise_argv(argv):
     import shlex
     if len(argv) == 1 and any(ch.isspace() for ch in argv[0]):
         blob = argv[0].strip()
-        name, separator, remainder = blob.partition(" ")
-        if separator and name in PATH_COMMANDS:
-            lines = remainder.splitlines()
-            raw_path = lines[0].strip()
-            try:
-                parsed = shlex.split(raw_path)
-            except ValueError:
-                parsed = []
-            path_arg = parsed[0] if len(parsed) == 1 else raw_path
+        lines = blob.splitlines()
+        first = lines[0].strip() if lines else ""
+        words = first.split(None, 1)
+        name = words[0] if words else ""
+        remainder = words[1] if len(words) > 1 else ""
+        if remainder and name in PATH_COMMANDS:
+            path_arg = _one_argument(remainder)
             return [name, path_arg] + [line.strip() for line in lines[1:] if line.strip()]
+        # An implicit title or path is one semantic argument. Keep its spaces intact;
+        # shlex would otherwise turn `Moby Dick` into an unknown command plus an arg.
+        if name not in COMMANDS:
+            return ([_one_argument(first)] if first else []) + [
+                line.strip() for line in lines[1:] if line.strip()]
         try:
             argv = shlex.split(argv[0])
         except ValueError:
@@ -1333,8 +1368,41 @@ def _normalise_argv(argv):
     return [argument for argument in argv if argument.strip()]
 
 
+def _one_argument(text):
+    """Unquote one title or path without splitting unquoted multiword input."""
+    import shlex
+    try:
+        parsed = shlex.split(text)
+    except ValueError:
+        return text
+    return parsed[0] if len(parsed) == 1 else text
+
+
 def _looks_like_a_slash_command(argument):
     return argument.startswith("/") and ":" in argument and not os.path.exists(argument)
+
+
+def _command_suggestion(argv):
+    """Return a likely command for an ambiguous single-word source, if any."""
+    if len(argv) != 1:
+        return None
+    token = argv[0].strip().casefold()
+    if (len(token) < 3 or any(ch in token for ch in "/\\.~:")
+            or any(ch.isspace() for ch in token)):
+        return None
+    import difflib
+    public = sorted(set(COMMANDS) - HOOK_COMMANDS - {"n", "b"})
+    matches = difflib.get_close_matches(token, public, n=1, cutoff=0.8)
+    return matches[0] if matches else None
+
+
+def _print_unknown(name):
+    """Keep the stale-checkout diagnostic for inputs that cannot be book sources."""
+    print("unknown command %r -- thinking-book %s running from %s"
+          % (name, version(), plugin_root()), file=sys.stderr)
+    print("known commands: %s" % ", ".join(sorted(COMMANDS)), file=sys.stderr)
+    print("if you expected this command, that checkout may be behind: "
+          "git pull in the directory above, then restart Claude Code.", file=sys.stderr)
 
 
 def main(argv):
@@ -1353,14 +1421,23 @@ def main(argv):
     name, args = argv[0], argv[1:]
     handler = COMMANDS.get(name)
     if not handler:
-        # A directory-source install runs straight out of a git checkout, so it goes stale
-        # silently. Say which copy is running rather than only that the command is unknown.
-        print("unknown command %r -- thinking-book %s running from %s"
-              % (name, version(), plugin_root()), file=sys.stderr)
-        print("known commands: %s" % ", ".join(sorted(COMMANDS)), file=sys.stderr)
-        print("if you expected this command, that checkout may be behind: "
-              "git pull in the directory above, then restart Claude Code.", file=sys.stderr)
-        return 2
+        command_shaped_hyphen = (len(argv) == 1 and "-" in name
+                                  and not any(ch in name for ch in "/\\.~:")
+                                  and not any(ch.isspace() for ch in name))
+        if (name.startswith("-") or command_shaped_hyphen
+                or _looks_like_a_slash_command(name)):
+            _print_unknown(name)
+            return 2
+        suggestion = _command_suggestion(argv)
+        if suggestion:
+            if tbstate.load_queue()["items"]:
+                escape = "add %s, then open %s" % (name, name)
+            else:
+                escape = "start %s" % name
+            print("Did you mean %r? To read a book called %s: %s"
+                  % (suggestion, name, escape), file=sys.stderr)
+            return 2
+        handler, args = cmd_source, [" ".join(argv)]
 
     # Hooks swallow everything; interactive commands report their errors.
     if name in HOOK_COMMANDS:

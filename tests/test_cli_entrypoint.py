@@ -37,7 +37,7 @@ class EntryPointTest(IsolatedStateCase):
         self.assertEqual(self.run_tb("b").stdout.strip(), "two")
 
     def test_forwards_exit_codes(self):
-        self.assertEqual(self.run_tb("nonsense").returncode, 2)
+        self.assertEqual(self.run_tb("--nonsense").returncode, 2)
         self.assertEqual(self.run_tb("load", "/nonexistent.epub").returncode, 1)
 
     def test_works_through_a_symlink_from_another_directory(self):
