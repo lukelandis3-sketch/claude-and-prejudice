@@ -46,6 +46,46 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 | `/book version` | Which version is running, and from which directory |
 | `/book refresh <secs\|off>` | Set `statusLine.refreshInterval` where your version supports it |
 
+## Turning pages without spending a turn
+
+A slash command is a model turn: an assistant response, latency, tokens, and book-keeping
+noise threaded through your actual work. Two better ways, neither of which does that.
+
+```sh
+/thinking-book:book install-cli      # symlinks bin/tb into ~/.local/bin
+```
+
+| How | Cost |
+|---|---|
+| `!tb n` inside Claude Code | **No model turn.** A leading `!` is bash mode: it runs locally, and the input and output are recorded as `<bash-input>`/`<bash-stdout>` lines that are not treated as a user message. They do still sit in the conversation and go along with your next prompt. |
+| `tb n` in another terminal | **Nothing at all.** No turn, no context. |
+| `/thinking-book:n` | A full model turn. Works, but it is the expensive option. |
+
+### The reader pane
+
+```sh
+tb reader
+```
+
+Run it in a split and you get the one-keypress page turn that is impossible inside Claude
+Code itself: **space** advances, `b` goes back, `r` redraws, `q` quits. It shows the line and
+your position, updates when something else moves the bookmark (timer mode, `!tb n`), and
+writes through to the same position file — so the spinner in the Claude pane follows along on
+its next turn. One bookmark, several windows.
+
+Pair it with `/book mode manual`, or lines will keep advancing on the clock underneath you.
+
+### A one-key binding
+
+In tmux, for a page turn that shows you the line without leaving the pane you are in:
+
+```tmux
+bind -n F8 run-shell 'tmux display-message "$(tb n)"'
+```
+
+Any terminal that can bind a key to a shell command will do the same — `tb n` prints the new
+line on stdout, so it composes with whatever your emulator offers.
+
 ### A real `/n`
 
 Namespacing is imposed by the plugin system and cannot be turned off from inside a plugin.

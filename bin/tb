@@ -1,0 +1,24 @@
+#!/bin/sh
+# thinking-book's short entry point, so turning a page is `tb n` rather than a long
+# python3 invocation. Inside Claude Code, `!tb n` runs in bash mode and costs no model
+# turn; from any other terminal it costs nothing at all.
+#
+# Resolves its own location through symlinks so it can be linked onto PATH from anywhere.
+
+set -u
+
+target="$0"
+while [ -L "$target" ]; do
+    link=$(readlink "$target") || break
+    case "$link" in
+        /*) target="$link" ;;
+        *) target="$(dirname "$target")/$link" ;;
+    esac
+done
+
+root=$(cd "$(dirname "$target")/.." && pwd) || {
+    echo "tb: cannot resolve the thinking-book directory" >&2
+    exit 1
+}
+
+exec python3 "$root/scripts/thinking_book.py" "$@"

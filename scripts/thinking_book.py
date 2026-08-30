@@ -493,6 +493,54 @@ def cmd_line(_args):
         print(line)
 
 
+def cmd_reader(_args):
+    """A companion pane where one keypress turns the page, outside the conversation."""
+    import reader
+
+    def state():
+        config = tbstate.load_config()
+        position, total = tbstate.read_pos(), tbstate.stream_count()
+        current = tbstate.item_at(position)
+        title = current[3] if current else None
+        return (current_line(), title, position, total, config["mode"])
+
+    def advance(step):
+        advance_by(step)
+        sync_spinner()
+
+    return reader.run(state, lambda: advance(1), lambda: advance(-1))
+
+
+def cmd_install_cli(args):
+    """Symlink bin/tb somewhere on PATH so page turns are `tb n`, not a python3 invocation."""
+    target_dir = os.path.abspath(os.path.expanduser(
+        args[0] if args else os.path.join("~", ".local", "bin")))
+    source = os.path.join(plugin_root(), "bin", "tb")
+    if not os.path.exists(source):
+        raise SystemExit("cannot find %s" % source)
+
+    os.makedirs(target_dir, exist_ok=True)
+    link = os.path.join(target_dir, "tb")
+
+    if os.path.islink(link) and os.path.realpath(link) == os.path.realpath(source):
+        print("Already installed: %s" % link)
+    else:
+        if os.path.islink(link) or os.path.exists(link):
+            raise SystemExit("%s already exists -- remove it first, or pass another "
+                             "directory." % link)
+        os.symlink(source, link)
+        print("Installed %s -> %s" % (link, source))
+
+    path_entries = [os.path.abspath(os.path.expanduser(p))
+                    for p in os.environ.get("PATH", "").split(os.pathsep) if p]
+    if target_dir not in path_entries:
+        print("Note: %s is not on your PATH. Add it, or symlink tb somewhere that is."
+              % target_dir)
+    else:
+        print("Turn the page with `tb n` in any terminal, or `!tb n` inside Claude Code "
+              "(no model turn).")
+
+
 def cmd_version(_args):
     """Which copy is actually running -- the answer when docs and behaviour disagree."""
     print("thinking-book %s" % version())
@@ -588,9 +636,14 @@ COMMANDS = {
     "dwell": cmd_dwell, "pause": cmd_pause, "resume": cmd_resume, "pane": cmd_pane,
     "off": cmd_off, "next": cmd_next, "back": cmd_back, "line": cmd_line,
     "repair": cmd_repair, "refresh": cmd_refresh, "version": cmd_version,
+    "reader": cmd_reader, "install-cli": cmd_install_cli,
     "sync": cmd_sync, "advance": cmd_advance, "restore": cmd_restore,
     "refresh-feeds": cmd_refresh_feeds,
 }
+
+# Brevity is the whole point of `tb`: `tb n` must work, not just `tb next`.
+COMMANDS["n"] = cmd_next
+COMMANDS["b"] = cmd_back
 
 
 def _normalise_argv(argv):
@@ -645,14 +698,15 @@ def main(argv):
         return 0
 
     try:
-        handler(args)
+        return handler(args) or 0
     except SystemExit as exc:
         print(exc, file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        return 0
     except Exception as exc:
         print("%s: %s" % (type(exc).__name__, exc), file=sys.stderr)
         return 1
-    return 0
 
 
 if __name__ == "__main__":
