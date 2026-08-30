@@ -117,6 +117,17 @@ def extract_text(path):
     return meta, "\n\n".join(t for t in texts if t)
 
 
+def is_epub(path):
+    """True for an EPUB container even when its filename has the wrong suffix."""
+    if not zipfile.is_zipfile(path):
+        return False
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return CONTAINER in archive.namelist()
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
 def load(path):
     path = os.path.abspath(os.path.expanduser(path))
     meta, text = extract_text(path)

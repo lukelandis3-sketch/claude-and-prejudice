@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import support
 
@@ -11,6 +12,7 @@ import epub
 import feed
 import gutenberg
 import libby
+import plaintext
 import readwise
 
 
@@ -57,6 +59,10 @@ class EpubTest(unittest.TestCase):
             fh.write("just text")
         with self.assertRaises(epub.NotAnEpub):
             epub.load(plain)
+
+    def test_detects_an_epub_with_the_wrong_extension(self):
+        renamed = support.make_epub(os.path.join(self._tmp.name, "book.bin"))
+        self.assertTrue(epub.is_epub(renamed))
 
 
 class GutenbergTest(unittest.TestCase):
@@ -275,6 +281,51 @@ class FetchTest(unittest.TestCase):
         for url in ("file:///etc/passwd", "ftp://example.com/x", "javascript:alert(1)"):
             with self.assertRaises(ValueError):
                 fetch.get(url)
+
+    def test_bounded_gzip_rejects_expansion_over_the_limit(self):
+        import gzip as gzip_module
+        import fetch
+        raw = gzip_module.compress(b"x" * 100)
+        with self.assertRaises(fetch.FetchError):
+            fetch._bounded_gunzip(raw, limit=20)
+
+    def test_wire_response_over_the_limit_is_rejected_not_truncated(self):
+        import fetch
+
+        class Headers(dict):
+            def get_content_charset(self):
+                return "utf-8"
+
+        class Response:
+            headers = Headers()
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+            def read(self, amount):
+                return b"x" * amount
+
+        with mock.patch("urllib.request.urlopen", return_value=Response()):
+            with self.assertRaises(fetch.FetchError):
+                fetch.get("https://example.test/large")
+
+
+class PlainTextTest(unittest.TestCase):
+    def test_rejects_pdf_zip_mobi_and_binary_data(self):
+        cases = (
+            (b"%PDF-1.7 data", "PDF"),
+            (b"PK\x03\x04 zip data", "ZIP"),
+            (b"x" * 60 + b"BOOKMOBI", "Kindle"),
+            (b"plain\x00binary", "binary"),
+        )
+        for raw, label in cases:
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(plaintext.NotPlainText, label):
+                    plaintext.decode(raw, "fixture")
+
+    def test_tolerates_a_small_amount_of_bad_utf8(self):
+        text = plaintext.decode(b"A mostly valid sentence with one odd byte: \xff end.")
+        self.assertIn("mostly valid", text)
 
 
 class FeedTest(unittest.TestCase):

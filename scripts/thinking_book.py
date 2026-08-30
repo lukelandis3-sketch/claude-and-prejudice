@@ -144,8 +144,14 @@ def cmd_load(args):
     if not os.path.exists(path):
         raise SystemExit("no such file: %s" % path)
 
-    if path.lower().endswith(".epub"):
-        import epub
+    import epub
+    suffix = os.path.splitext(path)[1].lower()
+    if suffix in (".mobi", ".azw", ".azw3", ".kfx"):
+        raise SystemExit(
+            "%s is a Kindle format. thinking-book does not decrypt DRM; use a DRM-free "
+            "EPUB or import My Clippings.txt highlights." % path
+        )
+    if path.lower().endswith(".epub") or epub.is_epub(path):
         meta, text = epub.load(path)
         item_id = _slug("epub", path)
     else:
@@ -375,10 +381,12 @@ def enable_statusline(auto=False):
     )
     if not enabled:
         return False, "another status line is already configured"
-    if original:
-        config["wrapped_statusline"] = original
-    config["surfaces"]["statusline"] = True
-    tbstate.save_config(config)
+    def mutate(config):
+        if original:
+            config["wrapped_statusline"] = original
+        config["surfaces"]["statusline"] = True
+
+    config = tbstate.update_config(mutate)
     _write_wrapped(config.get("wrapped_statusline"))
     return True, "enabled"
 
@@ -402,18 +410,19 @@ def after_interactive_import():
 
 def cmd_pane(args):
     action = (args[0] if args else "on").lower()
-    config = tbstate.load_config()
 
     if action == "on":
         enable_statusline(auto=False)
         print("Status line reading surface enabled.")
     elif action == "off":
-        config["surfaces"]["statusline"] = False
-        wrapped = config.get("wrapped_statusline")
-        if is_our_statusline(wrapped):
-            wrapped = None
-        config["wrapped_statusline"] = None
-        tbstate.save_config(config)
+        holder = {"wrapped": None}
+        def mutate(config):
+            config["surfaces"]["statusline"] = False
+            wrapped = config.get("wrapped_statusline")
+            holder["wrapped"] = None if is_our_statusline(wrapped) else wrapped
+            config["wrapped_statusline"] = None
+        tbstate.update_config(mutate)
+        wrapped = holder["wrapped"]
         _write_wrapped(None)
         tbsettings.restore_statusline(wrapped)
         print("Status line reading surface disabled." + (" Your own status line is back." if wrapped else ""))
@@ -440,8 +449,8 @@ def cmd_repair(_args):
                             "(this is what caused the repeated lines)")
 
     if is_our_statusline(config.get("wrapped_statusline")):
+        tbstate.update_config(lambda live: live.update({"wrapped_statusline": None}))
         config["wrapped_statusline"] = None
-        tbstate.save_config(config)
         findings.append("cleared a stored status line that was thinking-book's own")
 
     live = as_statusline_entry(tbsettings.current_statusline())
@@ -465,17 +474,18 @@ def cmd_refresh(args):
     """Set statusLine.refreshInterval, where the running Claude Code supports it."""
     if not args:
         raise SystemExit("usage: /book refresh <seconds|off>")
-    config = tbstate.load_config()
     if args[0] == "off":
-        config["statusline_refresh_interval"] = None
+        interval = None
         message = "Status line refresh interval cleared."
     elif args[0].isdigit():
-        config["statusline_refresh_interval"] = max(1, int(args[0]))
+        interval = max(1, int(args[0]))
         message = ("Status line will refresh every %ss where supported -- older Claude Code "
-                   "versions ignore this key." % config["statusline_refresh_interval"])
+                   "versions ignore this key." % interval)
     else:
         raise SystemExit("usage: /book refresh <seconds|off>")
-    tbstate.save_config(config)
+    config = tbstate.update_config(
+        lambda live: live.update({"statusline_refresh_interval": interval})
+    )
     if config["surfaces"]["statusline"]:
         tbsettings.set_statusline(
             statusline_command(),
@@ -590,45 +600,40 @@ def cmd_open(args):
 def cmd_mode(args):
     if not args or args[0] not in tbstate.VALID_MODES:
         raise SystemExit("usage: /book mode %s" % "|".join(tbstate.VALID_MODES))
-    config = tbstate.load_config()
-    config["mode"] = args[0]
-    tbstate.save_config(config)
+    tbstate.update_config(lambda config: config.update({"mode": args[0]}))
     print("Advance mode: %s" % args[0])
 
 
 def cmd_dwell(args):
     if not args or not args[0].isdigit():
         raise SystemExit("usage: /book dwell <seconds>")
-    config = tbstate.load_config()
-    config["dwell_seconds"] = max(1, int(args[0]))
-    tbstate.save_config(config)
+    config = tbstate.update_config(
+        lambda live: live.update({"dwell_seconds": max(1, int(args[0]))})
+    )
     print("Timer mode will turn the page every %d seconds." % config["dwell_seconds"])
 
 
 def cmd_pause(_args):
-    config = tbstate.load_config()
-    config["paused"] = True
-    tbstate.save_config(config)
+    tbstate.update_config(lambda config: config.update({"paused": True}))
     print("Paused on: %s" % (current_line() or "(nothing queued)"))
 
 
 def cmd_resume(_args):
-    config = tbstate.load_config()
-    config["paused"] = False
-    tbstate.save_config(config)
+    tbstate.update_config(lambda config: config.update({"paused": False}))
     tbstate.write_last_advance()
     print("Resumed.")
 
 
 def cmd_off(_args):
-    config = tbstate.load_config()
-    wrapped = config.get("wrapped_statusline")
-    if is_our_statusline(wrapped):
-        wrapped = None
-    config["paused"] = True
-    config["surfaces"] = {"statusline": False, "spinner": False}
-    config["wrapped_statusline"] = None
-    tbstate.save_config(config)
+    holder = {"wrapped": None}
+    def mutate(config):
+        wrapped = config.get("wrapped_statusline")
+        holder["wrapped"] = None if is_our_statusline(wrapped) else wrapped
+        config["paused"] = True
+        config["surfaces"] = {"statusline": False, "spinner": False}
+        config["wrapped_statusline"] = None
+    tbstate.update_config(mutate)
+    wrapped = holder["wrapped"]
     _write_wrapped(None)
     tbsettings.clear_spinner()
     tbsettings.restore_statusline(wrapped)
@@ -637,10 +642,10 @@ def cmd_off(_args):
 
 def cmd_on(_args):
     """Resume both reading surfaces -- the explicit inverse of `/book off`."""
-    config = tbstate.load_config()
-    config["paused"] = False
-    config["surfaces"] = {"statusline": True, "spinner": True}
-    tbstate.save_config(config)
+    tbstate.update_config(lambda config: config.update({
+        "paused": False,
+        "surfaces": {"statusline": True, "spinner": True},
+    }))
     enable_statusline(auto=False)
     tbstate.write_last_advance()
     sync_spinner(tbstate.load_config())
@@ -820,7 +825,19 @@ def _normalise_argv(argv):
     The quoting matters: an unquoted $ARGUMENTS let a pasted newline reach the shell,
     which then tried to execute the next line as a program.
     """
+    path_commands = {"load", "libby", "clippings", "readwise"}
     if len(argv) == 1 and any(ch.isspace() for ch in argv[0]):
+        blob = argv[0].strip()
+        name, separator, remainder = blob.partition(" ")
+        if separator and name in path_commands:
+            lines = remainder.splitlines()
+            raw_path = lines[0].strip()
+            try:
+                parsed = shlex.split(raw_path)
+            except ValueError:
+                parsed = []
+            path_arg = parsed[0] if len(parsed) == 1 else raw_path
+            return [name, path_arg] + [line.strip() for line in lines[1:] if line.strip()]
         try:
             argv = shlex.split(argv[0])
         except ValueError:
@@ -836,15 +853,20 @@ def _looks_like_a_slash_command(argument):
 
 def main(argv):
     argv = _normalise_argv(argv)
-    stray = [a for a in argv[1:] if _looks_like_a_slash_command(a)]
+    path_commands = {"load", "libby", "clippings", "readwise"}
+    checked = argv[2:] if argv and argv[0] in path_commands else argv[1:]
+    stray = [a for a in checked if _looks_like_a_slash_command(a)]
     if stray:
         print("ignoring what looks like a second slash command (%s) -- send one command "
               "per message." % stray[0], file=sys.stderr)
-        argv = [argv[0]] + [a for a in argv[1:] if not _looks_like_a_slash_command(a)]
+        keep = 2 if argv[0] in path_commands else 1
+        argv = argv[:keep] + [a for a in argv[keep:] if not _looks_like_a_slash_command(a)]
 
     if not argv:
-        print(__doc__.strip())
-        print("\nCommands: %s" % ", ".join(sorted(COMMANDS)))
+        print("Read something now: /book gutenberg <title> or /book load <file.epub>")
+        print("Then: /book status · /book open <book> · /book pause · /book off")
+        print("Sources: read <url> · clippings <file> · readwise <export> · libby <export> · feed")
+        print("All commands: %s" % ", ".join(sorted(COMMANDS)))
         return 0
 
     name, args = argv[0], argv[1:]
@@ -875,7 +897,7 @@ def main(argv):
     except KeyboardInterrupt:
         return 0
     except Exception as exc:
-        print("%s: %s" % (type(exc).__name__, exc), file=sys.stderr)
+        print(str(exc) or type(exc).__name__, file=sys.stderr)
         return 1
 
 

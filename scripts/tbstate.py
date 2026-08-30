@@ -185,6 +185,15 @@ def save_config(config):
     write_hot_env(config)
 
 
+def update_config(mutator):
+    """Locked read-modify-write for commands shared by concurrent sessions."""
+    with locked("config.lock"):
+        config = load_config()
+        mutator(config)
+        save_config(config)
+        return config
+
+
 # ------------------------------------------------------------------------ position
 
 def read_pos():

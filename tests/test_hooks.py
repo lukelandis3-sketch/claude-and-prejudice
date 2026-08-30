@@ -181,7 +181,8 @@ class HookTest(IsolatedStateCase):
         # Regression: a quoted "$ARGUMENTS" with nothing typed delivers one empty string.
         result = self.run_cli("")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Commands:", result.stdout)
+        self.assertIn("All commands:", result.stdout)
+        self.assertIn("Read something now", result.stdout)
         self.assertNotIn("unknown command", result.stderr)
 
     def test_unknown_command_is_an_error_not_a_crash(self):
@@ -219,6 +220,32 @@ class HookTest(IsolatedStateCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no such file", result.stderr)
         self.assertNotIn("second slash command", result.stderr)
+
+    def test_one_blob_load_preserves_unquoted_and_quoted_paths_with_spaces(self):
+        directory = os.path.join(self.config_dir, "My Books")
+        os.makedirs(directory)
+        path = os.path.join(directory, "small book.txt")
+        with open(path, "w") as fh:
+            fh.write("A readable sentence in a path containing spaces.")
+        for blob in ("load " + path, 'load "%s"' % path):
+            with self.subTest(blob=blob):
+                result = self.run_cli(blob)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_path_with_a_colon_is_reported_as_a_path(self):
+        path = os.path.join(self.config_dir, "missing: book.txt")
+        result = self.run_cli("load " + path)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(path, result.stderr)
+        self.assertNotIn("second slash command", result.stderr)
+
+    def test_path_command_still_filters_a_pasted_second_slash_command(self):
+        path = os.path.join(self.config_dir, "book.txt")
+        with open(path, "w") as fh:
+            fh.write("A readable sentence.")
+        result = self.run_cli("load %s\n/thinking-book:book off" % path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("second slash command", result.stderr)
 
     def test_version_reports_the_manifest_version_and_root(self):
         result = self.run_cli("version")

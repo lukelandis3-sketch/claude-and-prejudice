@@ -308,6 +308,12 @@ class RoundTripTest(IsolatedStateCase):
         self.assertIn("2 highlight book", result.stdout)
         self.assertEqual(len(self.tbstate.load_queue()["items"]), 2)
 
+    def test_load_routes_a_misnamed_epub_by_content(self):
+        renamed = make_epub(os.path.join(self.config_dir, "voyage.bin"))
+        result = self.run_cli("load", renamed)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("The Test Voyage", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
