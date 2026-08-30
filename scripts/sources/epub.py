@@ -109,7 +109,7 @@ def extract_text(path):
 
     if not meta["title"]:
         meta["title"] = os.path.splitext(os.path.basename(path))[0]
-    return meta, "\n".join(t for t in texts if t)
+    return meta, "\n\n".join(t for t in texts if t)
 
 
 def load(path):

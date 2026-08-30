@@ -28,10 +28,13 @@ Restart Claude Code once so the status line takes effect.
 
 ## Reading
 
+Plugin commands are namespaced, so they are `/thinking-book:n`, `/thinking-book:book`, and
+so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
+
 | Command | What it does |
 |---|---|
-| `/n` | Turn the page — advance one line |
-| `/b` | Back one line |
+| `/thinking-book:n` | Turn the page — advance one line |
+| `/thinking-book:b` | Back one line |
 | `/book status` | Title, author, position, percent read, current line |
 | `/book queue` | What's queued, and what you're in the middle of |
 | `/book mode timer\|turn\|manual` | How pages turn (below) |
@@ -39,6 +42,27 @@ Restart Claude Code once so the status line takes effect.
 | `/book pause` / `/book resume` | Freeze on a line, or carry on |
 | `/book pane on\|off` | Attach or detach the status line surface |
 | `/book off` | Full stop — stock spinner verbs and your own status line back |
+| `/book repair` | Undo a self-wrapped status line (see below) |
+| `/book refresh <secs\|off>` | Set `statusLine.refreshInterval` where your version supports it |
+
+### A real `/n`
+
+Namespacing is imposed by the plugin system and cannot be turned off from inside a plugin.
+To get a genuine two-keystroke page turn, add a *personal* command — files in
+`~/.claude/commands/` are not namespaced:
+
+```sh
+mkdir -p ~/.claude/commands
+cat > ~/.claude/commands/n.md <<'EOF'
+---
+description: Turn the page
+allowed-tools: Bash(python3:*)
+---
+!`python3 ~/.claude/plugins/*/thinking-book/scripts/thinking_book.py next`
+EOF
+```
+
+Adjust the path to wherever the plugin is installed.
 
 ### Advance modes
 
@@ -107,8 +131,18 @@ them with a single `cat`.
 
 ## Honest limitations
 
+- **Completed turns always show stock verbs.** This is the big one. The lines that stay in
+  your scrollback — `Baked for 1s · done`, `Brewed for 1s · done` — come from a *separate,
+  hardcoded* past-tense list with no settings override:
+  ```js
+  cW1 = ["Baked","Brewed","Churned","Cogitated","Cooked","Crunched","Sautéed","Worked"]
+  ```
+  `spinnerVerbs` replaces only the *present-tense* verb on the **live** spinner, which
+  exists only while a turn is running. So the book appears while Claude is thinking and
+  leaves no trace once the turn ends. Nothing a plugin can do changes this — and it is the
+  strongest argument for the status line being the primary surface, since that one persists.
 - **The spinner text cannot change during a turn.** It's captured in a `useState`
-  initializer when the spinner mounts. `/n` lands on the *next* spinner.
+  initializer when the spinner mounts. A manual advance lands on the *next* spinner.
 - **No single key can turn the page.** Claude Code's keybindings map to a closed enum of
   built-in actions; there's no "run a command" action to bind. `/n` is the shortest path.
 - **The status line has no wall-clock refresh** — it advances per assistant message, so a
@@ -118,6 +152,9 @@ them with a single `cat`.
 - **`disableAllHooks: true` disables the status line too**, and the plugin goes dark.
 - **Concurrent sessions** share one global setting and will interleave each other's lines.
   Locking keeps the bookmark consistent, so nothing is lost.
+- **`refreshInterval` may not exist in your version.** Claude Code 2.1.251 has no such key,
+  so `/book refresh` is a no-op there; other versions (and tools like ccstatusline) do use
+  it. Harmless either way — unknown settings keys are ignored.
 - **Your `settings.json` gets reformatted** on first write. A copy of the original is kept
   at `~/.claude/thinking-book/settings.backup.json`, and `/book off` restores every key
   the plugin touched.
@@ -125,6 +162,25 @@ them with a single `cat`.
 `spinnerVerbs` and `statusLine` are documented settings. Single-element sampling is
 inference from the current implementation — if a future release re-picks verbs on a timer,
 this degrades to showing nearby lines rather than breaking.
+
+## If the status line repeats the same line over and over
+
+Versions before 0.2 could wrap their *own* status line when `pane on` ran from two
+different paths — a git clone once, the installed plugin the next time. The script then
+re-read the same global `wrapped.cmd` and invoked itself, recursing until Claude Code's 5 s
+timeout killed it and printing the same line a dozen times over.
+
+```
+/book repair
+```
+
+0.2 makes this impossible three ways over: an exported `TB_IN_STATUSLINE` guard that stops
+recursion at the first level, path-independent identity so `pane on` recognises its own
+script wherever it was installed from, and `repair` to unwind machines already in that state.
+
+Unlike most status line tools — [ccstatusline](https://github.com/sirmalloc/ccstatusline) and
+friends simply overwrite `statusLine` — thinking-book wraps whatever you already had and runs
+it alongside the book. `/book off` puts it back exactly as it was.
 
 ## Development
 

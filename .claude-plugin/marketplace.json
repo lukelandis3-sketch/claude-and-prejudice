@@ -3,7 +3,7 @@
   "owner": { "name": "lukelandis3-sketch" },
   "metadata": {
     "description": "A single-plugin marketplace hosting thinking-book.",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "plugins": [
     {

@@ -95,4 +95,4 @@ def load(path):
     }
     # Highlights are already discrete passages; keep them as their own paragraphs so the
     # chunker never runs two unrelated quotes together.
-    return meta, "\n".join(item["text"] for item in highlights)
+    return meta, "\n\n".join(item["text"] for item in highlights)

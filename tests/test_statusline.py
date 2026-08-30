@@ -8,7 +8,7 @@ import os
 import time
 import unittest
 
-from support import IsolatedStateCase
+from support import STATUSLINE, IsolatedStateCase
 
 
 class StatusLineTest(IsolatedStateCase):
@@ -102,6 +102,28 @@ class StatusLineTest(IsolatedStateCase):
         result = self.run_statusline()
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "a line")
+
+    def test_a_wrapped_command_pointing_back_at_us_cannot_recurse(self):
+        # Regression: `pane on` from two different plugin roots used to poison wrapped.cmd
+        # with our own script, which then re-read the same file and invoked itself until
+        # Claude Code's 5s timeout killed it -- printing the same line a dozen times.
+        self.seed_stream(["CHAPTER 14.", "line two"], mode="manual")
+        self._wrap('sh "%s"' % STATUSLINE)
+
+        start = time.time()
+        result = self.run_statusline()
+        elapsed = time.time() - start
+
+        self.assertEqual(result.returncode, 0)
+        self.assertLess(elapsed, 5, "status line took %.1fs -- it is recursing" % elapsed)
+        lines = [line for line in result.stdout.split("\n") if line.strip()]
+        self.assertEqual(lines, ["CHAPTER 14."], "expected one line, got %r" % lines)
+
+    def test_recursion_guard_is_inherited_by_wrapped_commands(self):
+        self.seed_stream(["a line"], mode="manual")
+        self._wrap("printenv TB_IN_STATUSLINE")
+        output = self.run_statusline().stdout
+        self.assertIn("1", output)
 
     # ---------------------------------------------------------- robustness
 

@@ -9,6 +9,15 @@
 
 set -u
 
+# If a wrapped command turns out to be another thinking-book status line -- which happens
+# when `pane on` runs from two different plugin roots -- this script would invoke itself
+# forever, bounded only by Claude Code's 5s timeout. One exported marker ends that.
+if [ "${TB_IN_STATUSLINE:-}" = "1" ]; then
+    exit 0
+fi
+TB_IN_STATUSLINE=1
+export TB_IN_STATUSLINE
+
 TB_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/thinking-book"
 
 # Claude Code pipes session JSON on stdin; a wrapped status line still expects it.

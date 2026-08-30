@@ -23,6 +23,7 @@ DEFAULT_CONFIG = {
     "paused": False,
     "surfaces": {"statusline": True, "spinner": True},
     "wrapped_statusline": None,  # the user's own statusLine command, if we wrapped one
+    "statusline_refresh_interval": None,  # written only where the CLI version supports it
     "prefix": "",
 }
 

@@ -45,7 +45,9 @@ class TextExtractor(HTMLParser):
     def text(self):
         joined = "".join(self._parts)
         joined = re.sub(r"[ \t\r\f\v]+", " ", joined)
-        joined = re.sub(r"\n\s*\n+", "\n", joined)
+        # A blank line is a paragraph boundary and the chunker relies on it; a single
+        # newline is only a soft wrap. Collapse runs of breaks to exactly one boundary.
+        joined = re.sub(r"\n\s*\n+", "\n\n", joined)
         return joined.strip()
 
 

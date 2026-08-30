@@ -48,6 +48,30 @@ class ChunkerTest(unittest.TestCase):
         self.assertNotIn("\x1b", fragment)
         self.assertNotIn("\x07", fragment)
 
+    def test_paragraphs_never_merge_into_one_fragment(self):
+        # Regression: collapsing blank lines ran unrelated blocks together, producing
+        # fragments like "By Herman Melville CONTENTS ETYMOLOGY."
+        fragments = chunker.to_fragments("MOBY-DICK.\n\nBy Herman Melville\n\nCONTENTS")
+        self.assertEqual(fragments, ["MOBY-DICK.", "By Herman Melville", "CONTENTS"])
+
+    def test_single_newline_is_a_soft_wrap_not_a_boundary(self):
+        fragments = chunker.to_fragments("Call me Ishmael. Some years ago\nI went to sea.")
+        self.assertEqual(fragments, ["Call me Ishmael.", "Some years ago I went to sea."])
+
+    def test_numbered_headings_keep_their_titles(self):
+        # Regression: "CHAPTER 14. Nantucket." split into two useless fragments.
+        for raw, expected in [
+            ("CHAPTER 14. Nantucket.", "CHAPTER 14. Nantucket."),
+            ("PART II. The Return.", "PART II. The Return."),
+            ("BOOK 3. Aftermath.", "BOOK 3. Aftermath."),
+        ]:
+            with self.subTest(raw=raw):
+                self.assertEqual(chunker.to_fragments(raw), [expected])
+
+    def test_heading_rejoin_does_not_swallow_following_prose(self):
+        fragments = chunker.to_fragments("CHAPTER 1. Loomings.\n\nCall me Ishmael.")
+        self.assertEqual(fragments, ["CHAPTER 1. Loomings.", "Call me Ishmael."])
+
     def test_fragments_never_contain_newlines(self):
         # The stream file is one fragment per line; a newline would corrupt the index.
         fragments = chunker.to_fragments("First line.\nSecond line.\n\nThird line.")

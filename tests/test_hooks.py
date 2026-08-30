@@ -134,11 +134,17 @@ class HookTest(IsolatedStateCase):
             result = self.run_cli(command)
             self.assertEqual(result.returncode, 0, "%s: %s" % (command, result.stderr))
 
-    def test_hooks_print_nothing_on_the_happy_path(self):
+    def test_hooks_print_nothing_when_invoked_with_quiet(self):
+        # hooks.json passes --quiet; a person running the same command gets feedback.
         self.seed_stream(["one", "two"])
         for command in ("sync", "advance", "restore"):
-            result = self.run_cli(command)
+            result = self.run_cli(command, "--quiet")
             self.assertEqual(result.stdout, "", "%s printed %r" % (command, result.stdout))
+
+    def test_hook_commands_report_when_run_interactively(self):
+        self.seed_stream(["one", "two"])
+        result = self.run_cli("sync")
+        self.assertEqual(result.stdout.strip(), "one")
 
     def test_network_failure_is_reported_cleanly_not_as_a_traceback(self):
         # Unreachable host: the user should get one line, not a stack trace.

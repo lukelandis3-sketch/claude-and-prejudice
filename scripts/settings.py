@@ -86,11 +86,20 @@ def current_statusline():
     return read_settings().get(STATUSLINE_KEY)
 
 
-def set_statusline(command, padding=None):
+def set_statusline(command, padding=None, refresh_interval=None):
+    """Install our status line command.
+
+    `refresh_interval` is written only when set. It is not in every Claude Code version's
+    settings schema; versions that do not know it ignore it, and it is what gives timer
+    mode a real wall clock on versions that do.
+    """
+
     def mutate(settings):
         entry = {"type": "command", "command": command}
         if padding is not None:
             entry["padding"] = padding
+        if refresh_interval is not None:
+            entry["refreshInterval"] = refresh_interval
         settings[STATUSLINE_KEY] = entry
 
     return update(mutate)

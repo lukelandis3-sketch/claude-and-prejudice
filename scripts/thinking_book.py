@@ -9,6 +9,7 @@ to block a turn or break a status line.
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 
@@ -21,6 +22,7 @@ import chunker
 import settings as tbsettings
 import tbstate
 
+SCRIPT_NAME = "statusline.sh"
 FEED_REFRESH_SECONDS = 3600
 MAX_NEW_ITEMS_PER_FEED = 3
 HOOK_COMMANDS = {"sync", "advance", "restore", "refresh-feeds"}
@@ -224,11 +226,34 @@ def refresh_feeds(force=False):
 
 # ------------------------------------------------------------------------- surfaces
 
+def is_our_statusline(entry):
+    """Is this status line command one of ours, whatever path it was installed from?
+
+    Identity must not depend on the plugin root: running `pane on` from a git clone and
+    again from the installed plugin yields two different paths to the same script. Taking
+    the second for a third-party status line is what made statusline.sh wrap -- and then
+    invoke -- itself, recursing until Claude Code's timeout killed it.
+    """
+    if isinstance(entry, dict):
+        command = entry.get("command") or ""
+    else:
+        command = entry or ""
+    if not command or SCRIPT_NAME not in command:
+        return False
+    if "thinking-book" in command or "thinking_book" in command:
+        return True
+    # Installed under some other directory name: check the script sits beside our CLI.
+    for token in re.findall(r'[^\s"\']*' + re.escape(SCRIPT_NAME), command):
+        if os.path.exists(os.path.join(os.path.dirname(token), "thinking_book.py")):
+            return True
+    return False
+
+
 def _write_wrapped(entry):
     """Mirror the user's own status line command into a flat file for the hot path."""
     target = tbstate.path("wrapped.cmd")
     command = (entry or {}).get("command") if isinstance(entry, dict) else None
-    if command:
+    if command and not is_our_statusline(command):
         tbstate.atomic_write(target, command + "\n")
     elif os.path.exists(target):
         os.unlink(target)
@@ -241,17 +266,23 @@ def cmd_pane(args):
     if action == "on":
         existing = tbsettings.current_statusline()
         ours = statusline_command()
-        if existing and existing.get("command") != ours:
+        if existing and not is_our_statusline(existing):
             # Preserve whatever the user already had; statusline.sh will run it too.
             config["wrapped_statusline"] = existing
+        # If `existing` is already ours, keep whatever we stored the first time and do
+        # not nest. This makes `pane on` idempotent across plugin roots.
         config["surfaces"]["statusline"] = True
         tbstate.save_config(config)
         _write_wrapped(config.get("wrapped_statusline"))
-        tbsettings.set_statusline(ours, padding=existing.get("padding") if existing else None)
+        padding = existing.get("padding") if existing and not is_our_statusline(existing) else None
+        tbsettings.set_statusline(ours, padding=padding,
+                                  refresh_interval=config.get("statusline_refresh_interval"))
         print("Status line reading surface enabled.")
     elif action == "off":
         config["surfaces"]["statusline"] = False
         wrapped = config.get("wrapped_statusline")
+        if is_our_statusline(wrapped):
+            wrapped = None
         config["wrapped_statusline"] = None
         tbstate.save_config(config)
         _write_wrapped(None)
@@ -259,6 +290,68 @@ def cmd_pane(args):
         print("Status line reading surface disabled." + (" Your own status line is back." if wrapped else ""))
     else:
         raise SystemExit("usage: /book pane on|off")
+
+
+def cmd_repair(_args):
+    """Undo a self-wrapped status line and report what was unwound.
+
+    Needed for machines already in the broken state, where `pane off` would otherwise
+    restore an inner thinking-book script rather than the user's own status line.
+    """
+    findings = []
+    config = tbstate.load_config()
+
+    wrapped_file = tbstate.path("wrapped.cmd")
+    if os.path.exists(wrapped_file):
+        with open(wrapped_file, encoding="utf-8") as fh:
+            command = fh.read().strip()
+        if is_our_statusline(command):
+            os.unlink(wrapped_file)
+            findings.append("removed a wrapped.cmd that pointed back at thinking-book "
+                            "(this is what caused the repeated lines)")
+
+    if is_our_statusline(config.get("wrapped_statusline")):
+        config["wrapped_statusline"] = None
+        tbstate.save_config(config)
+        findings.append("cleared a stored status line that was thinking-book's own")
+
+    live = tbsettings.current_statusline()
+    if live and is_our_statusline(live):
+        expected = statusline_command()
+        if live.get("command") != expected:
+            tbsettings.set_statusline(
+                expected, padding=live.get("padding"),
+                refresh_interval=config.get("statusline_refresh_interval"))
+            findings.append("repointed the status line at this install's script")
+
+    if findings:
+        print("Repaired:")
+        for finding in findings:
+            print("  - %s" % finding)
+    else:
+        print("Nothing to repair -- no self-wrapping detected.")
+
+
+def cmd_refresh(args):
+    """Set statusLine.refreshInterval, where the running Claude Code supports it."""
+    if not args:
+        raise SystemExit("usage: /book refresh <seconds|off>")
+    config = tbstate.load_config()
+    if args[0] == "off":
+        config["statusline_refresh_interval"] = None
+        message = "Status line refresh interval cleared."
+    elif args[0].isdigit():
+        config["statusline_refresh_interval"] = max(1, int(args[0]))
+        message = ("Status line will refresh every %ss where supported -- older Claude Code "
+                   "versions ignore this key." % config["statusline_refresh_interval"])
+    else:
+        raise SystemExit("usage: /book refresh <seconds|off>")
+    tbstate.save_config(config)
+    if config["surfaces"]["statusline"]:
+        tbsettings.set_statusline(
+            statusline_command(),
+            refresh_interval=config.get("statusline_refresh_interval"))
+    print(message)
 
 
 # -------------------------------------------------------------------------- reading
@@ -369,6 +462,8 @@ def cmd_resume(_args):
 def cmd_off(_args):
     config = tbstate.load_config()
     wrapped = config.get("wrapped_statusline")
+    if is_our_statusline(wrapped):
+        wrapped = None
     config["paused"] = True
     config["surfaces"] = {"statusline": False, "spinner": False}
     config["wrapped_statusline"] = None
@@ -406,12 +501,19 @@ def _spawn_feed_refresh():
         )
 
 
-def cmd_refresh_feeds(_args):
-    refresh_feeds()
+def _report(args, message):
+    """Hooks pass --quiet and stay silent; a person running the same command gets a line."""
+    if "--quiet" not in args:
+        print(message)
+
+
+def cmd_refresh_feeds(args):
+    added = refresh_feeds()
     sync_spinner()
+    _report(args, "Feeds refreshed; %d new item(s) queued." % added)
 
 
-def cmd_sync(_args):
+def cmd_sync(args):
     """SessionStart: make sure the plumbing exists, then show where we left off."""
     tbstate.ensure_home()
     tbsettings.ensure_settings_file()
@@ -425,9 +527,10 @@ def cmd_sync(_args):
             _spawn_feed_refresh()
         except Exception:
             pass
+    _report(args, current_line() or "Nothing queued -- try /book gutenberg <title>.")
 
 
-def cmd_advance(_args):
+def cmd_advance(args):
     """Stop: apply the turn-based half of the advance policy, then sync the spinner.
 
     In timer mode the status line is normally the thing that turns pages, since it runs
@@ -437,6 +540,7 @@ def cmd_advance(_args):
     config = tbstate.load_config()
     if config["paused"] or tbstate.stream_count() == 0:
         sync_spinner(config)
+        _report(args, current_line() or "Nothing queued.")
         return
 
     mode = config["mode"]
@@ -450,11 +554,13 @@ def cmd_advance(_args):
         elif time.time() - last >= config["dwell_seconds"]:
             advance_by(1)
     sync_spinner(config)
+    _report(args, current_line() or "Nothing queued.")
 
 
-def cmd_restore(_args):
+def cmd_restore(args):
     """SessionEnd: do not leave a stale line in settings for non-plugin sessions."""
     tbsettings.clear_spinner()
+    _report(args, "Spinner override removed.")
 
 
 COMMANDS = {
@@ -462,6 +568,7 @@ COMMANDS = {
     "feed": cmd_feed, "queue": cmd_queue, "status": cmd_status, "mode": cmd_mode,
     "dwell": cmd_dwell, "pause": cmd_pause, "resume": cmd_resume, "pane": cmd_pane,
     "off": cmd_off, "next": cmd_next, "back": cmd_back, "line": cmd_line,
+    "repair": cmd_repair, "refresh": cmd_refresh,
     "sync": cmd_sync, "advance": cmd_advance, "restore": cmd_restore,
     "refresh-feeds": cmd_refresh_feeds,
 }

@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/thinking_book.py\" sync",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/thinking_book.py\" sync --quiet",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/thinking_book.py\" advance",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/thinking_book.py\" advance --quiet",
             "timeout": 10
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/thinking_book.py\" restore",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/thinking_book.py\" restore --quiet",
             "timeout": 10
           }
         ]

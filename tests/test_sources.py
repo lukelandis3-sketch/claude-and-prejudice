@@ -61,6 +61,50 @@ class GutenbergTest(unittest.TestCase):
     def test_leaves_text_without_markers_alone(self):
         self.assertEqual(gutenberg.strip_boilerplate("Just prose."), "Just prose.")
 
+    GUTENBERG_TEXT = """MOBY-DICK; or, THE WHALE.
+
+By Herman Melville
+
+CONTENTS
+
+CHAPTER 1. Loomings.
+
+CHAPTER 2. The Carpet-Bag.
+
+CHAPTER 14. Nantucket.
+
+CHAPTER 134. The Chase-Second Day.
+
+CHAPTER 135. The Chase.-Third Day.
+
+ETYMOLOGY.
+
+The pale Usher-threadbare in coat, heart, body, and brain; I see him now.
+
+CHAPTER 1. Loomings.
+
+Call me Ishmael. Some years ago I thought I would sail about a little.
+"""
+
+    def test_front_matter_strip_opens_on_the_first_chapter(self):
+        # Regression: a real install spent its opening fragments reading the contents list.
+        stripped = gutenberg.strip_front_matter(self.GUTENBERG_TEXT)
+        self.assertTrue(stripped.startswith("CHAPTER 1. Loomings."))
+        self.assertIn("Call me Ishmael.", stripped)
+        self.assertNotIn("CHAPTER 135.", stripped)
+
+    def test_front_matter_strip_leaves_text_without_a_contents_alone(self):
+        prose = "Call me Ishmael.\n\nSome years ago I thought I would sail."
+        self.assertEqual(gutenberg.strip_front_matter(prose), prose)
+
+    def test_body_chapter_headings_are_not_mistaken_for_a_contents_list(self):
+        # In the body each heading is followed by prose, so runs are never long.
+        body = "\n\n".join(
+            "CHAPTER %d. Title.\n\nSome prose for chapter %d that runs on a while." % (n, n)
+            for n in range(1, 12)
+        )
+        self.assertIn("chapter 11", gutenberg.strip_front_matter(body))
+
     def test_prefers_utf8_plain_text_and_skips_zips(self):
         formats = {
             "application/epub+zip": "https://x/book.epub",

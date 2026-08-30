@@ -21,6 +21,13 @@ _CLAUSE_SPLIT = re.compile(
     r'(?<=[;:—])\s+|(?<=,)\s+(?=(?:and|but|or|which|who|that|while|though)\s)'
 )
 
+# "CHAPTER 14." is a heading, not a sentence -- it belongs to the title that follows it.
+_HEADING = re.compile(
+    r'^(CHAPTER|BOOK|PART|VOLUME|ACT|SCENE|SECTION)\s+[\dIVXLCDM]+\.$', re.I
+)
+
+_PARAGRAPH_BREAK = re.compile(r'\n\s*\n+')
+
 _CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 _ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 
@@ -42,6 +49,17 @@ def clean_text(raw):
     return text.strip()
 
 
+def split_paragraphs(raw):
+    """Split on blank lines. A single newline is a soft wrap, a blank line is a boundary.
+
+    Sentence splitting must never cross a paragraph boundary, or a heading runs into the
+    body that follows it and unrelated blocks merge into one nonsense fragment.
+    """
+    if not raw:
+        return []
+    return [block for block in (b.strip() for b in _PARAGRAPH_BREAK.split(raw)) if block]
+
+
 def _ends_with_abbreviation(chunk):
     match = re.search(r'([A-Za-z.]+)\.$', chunk.strip())
     if not match:
@@ -58,7 +76,8 @@ def split_sentences(text):
         piece = piece.strip()
         if not piece:
             continue
-        if sentences and _ends_with_abbreviation(sentences[-1]):
+        if sentences and (_ends_with_abbreviation(sentences[-1])
+                          or _HEADING.match(sentences[-1])):
             sentences[-1] = sentences[-1] + " " + piece
         else:
             sentences.append(piece)
@@ -123,12 +142,13 @@ def to_fragments(raw, hard_max=DEFAULT_HARD_MAX):
     Every returned fragment is non-empty and contains at least one letter -- an empty
     verbs array makes Claude Code fall back to its stock gerunds silently.
     """
-    text = clean_text(raw)
     fragments = []
-    for sentence in split_sentences(text):
-        parts = [sentence] if len(sentence) <= hard_max else _split_long(sentence, hard_max)
-        for part in parts:
-            part = part.strip()
-            if is_meaningful(part):
-                fragments.append(part)
+    for paragraph in split_paragraphs(raw):
+        text = clean_text(paragraph)
+        for sentence in split_sentences(text):
+            parts = [sentence] if len(sentence) <= hard_max else _split_long(sentence, hard_max)
+            for part in parts:
+                part = part.strip()
+                if is_meaningful(part):
+                    fragments.append(part)
     return fragments

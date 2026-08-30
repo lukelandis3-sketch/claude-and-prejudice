@@ -54,7 +54,7 @@ def extract(html, url=None):
         # A page with no long paragraphs: fall back to everything rather than nothing.
         lines = [line.strip() for line in text.split("\n") if line.strip()]
     meta = {"title": title or (url or "article"), "author": None, "kind": "article", "source": url}
-    return meta, "\n".join(lines)
+    return meta, "\n\n".join(lines)
 
 
 def load(url):
