@@ -151,6 +151,12 @@ def cmd_load(args):
     if not os.path.exists(path):
         raise SystemExit("no such file: %s" % path)
 
+    if os.path.basename(path).casefold() == "my clippings.txt":
+        import clippings
+        _install_many("clippings", clippings.load(path))
+        after_interactive_import()
+        return
+
     import epub
     suffix = os.path.splitext(path)[1].lower()
     if suffix in (".mobi", ".azw", ".azw3", ".kfx"):

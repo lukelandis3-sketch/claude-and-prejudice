@@ -113,6 +113,19 @@ class ConfigTest(IsolatedStateCase):
             contents = fh.read()
         self.assertIn("TB_PREFIX='it'\\''s $(rm -rf /) '", contents)
 
+    def test_identical_config_update_does_not_rewrite_config_or_hot_cache(self):
+        self.tbstate.save_config(self.tbstate.load_config())
+        before = (
+            os.stat(self.tbstate.path("config.json")).st_ino,
+            os.stat(self.tbstate.path("hot.env")).st_ino,
+        )
+        self.tbstate.update_config(lambda _config: None)
+        after = (
+            os.stat(self.tbstate.path("config.json")).st_ino,
+            os.stat(self.tbstate.path("hot.env")).st_ino,
+        )
+        self.assertEqual(after, before)
+
 
 class PositionTest(IsolatedStateCase):
     def test_position_defaults_to_one(self):

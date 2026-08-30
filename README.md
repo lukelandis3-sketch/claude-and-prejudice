@@ -149,7 +149,8 @@ prose, use DRM-free copies (Standard Ebooks, No Starch, O'Reilly, most Humble bu
 the public domain, or the open web.
 
 `My Clippings.txt` and Readwise imports are offline and contain only excerpts the user
-exported. They do not read or decrypt Kindle book files.
+exported. They do not read or decrypt Kindle book files. The standard filename is also
+recognized automatically by `/book load <path/to/My Clippings.txt>`.
 
 ## How it works
 
@@ -167,8 +168,9 @@ The status line is the livelier surface. Claude Code re-runs a `statusLine` comm
 per assistant message**, so it updates several times inside a single turn. `statusline.sh`
 is the hot path: no Python, no JSON parsing, no full-file scans — Python pre-chunks
 immutable 256-line shards and publishes them through one atomic generation pointer. The
-shell reads at most one shard. On the development Mac it measures 8.82 ms median / 9.62 ms
-p90 at line 25,000 of 25,000 over 100 warm invocations, against a 5 s timeout.
+shell reads at most one shard. Across repeated 100-invocation runs on the development Mac,
+line 25,000 of 25,000 measured roughly 9–11 ms median in manual mode and 12–14 ms in timer
+mode, against a 5 s timeout.
 
 State lives in `~/.claude/thinking-book/`. JSON files are the human-readable record;
 flat one-value files (`pos`, `last`, `count`, `hot.env`) and immutable stream shards keep

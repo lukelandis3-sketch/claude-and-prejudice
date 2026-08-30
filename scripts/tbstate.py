@@ -193,8 +193,11 @@ def update_config(mutator):
     """Locked read-modify-write for commands shared by concurrent sessions."""
     with locked("config.lock"):
         config = load_config()
+        before = json.loads(json.dumps(config))
         mutator(config)
-        save_config(config)
+        if (config != before or not os.path.exists(path("config.json"))
+                or not os.path.exists(path("hot.env"))):
+            save_config(config)
         return config
 
 

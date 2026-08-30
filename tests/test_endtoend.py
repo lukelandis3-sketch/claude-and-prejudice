@@ -359,6 +359,16 @@ class RoundTripTest(IsolatedStateCase):
         self.run_cli("clippings", second)
         self.assertEqual(self.tbstate.load_queue()["items"], ids)
 
+    def test_load_recognizes_my_clippings_by_its_standard_filename(self):
+        path = os.path.join(self.config_dir, "My Clippings.txt")
+        with open(path, "w") as fh:
+            fh.write("Book One (Author A)\n- Your Highlight\n\nA saved highlight.\n==========")
+        result = self.run_cli("load", path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("highlight book", result.stdout)
+        item = self.tbstate.load_queue()["items"][0]
+        self.assertEqual(self.tbstate.item_meta(item)["kind"], "highlights")
+
     def test_readwise_csv_imports_in_one_batch(self):
         path = os.path.join(self.config_dir, "readwise.csv")
         with open(path, "w") as fh:
