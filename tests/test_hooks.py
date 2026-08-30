@@ -38,6 +38,14 @@ class HookTest(IsolatedStateCase):
         self.run_cli("sync")
         self.assertTrue(os.path.exists(self.tbstate.path("hot.env")))
 
+    def test_sync_rebuilds_when_generation_directory_is_gone(self):
+        import shutil
+        self.seed_stream(["one", "two"], mode="manual")
+        shutil.rmtree(self.tbstate.path("stream-generations"))
+        self.run_cli("sync", "--quiet")
+        self.assertEqual(self.tbstate.stream_line(1), "one")
+        self.assertEqual(self.run_statusline().stdout.strip(), "one")
+
     # -------------------------------------------------------------------- Stop: turn
 
     def test_turn_mode_advances_exactly_one_line_per_stop(self):
@@ -86,6 +94,15 @@ class HookTest(IsolatedStateCase):
         self.tbstate.write_last_advance(time.time() - 1000)
         self.run_cli("advance")
         self.assertEqual(self.pos(), 1)
+
+    def test_stop_takes_over_the_clock_after_pane_off(self):
+        self.seed_stream(["one", "two"], mode="timer", dwell=600, statusline=True)
+        self.tbstate.write_last_advance(time.time())
+        self.run_statusline()
+        self.run_cli("pane", "off")
+        self.tbstate.write_last_advance(time.time() - 1000)
+        self.run_cli("advance", "--quiet")
+        self.assertEqual(self.pos(), 2)
 
     def test_timer_mode_advances_on_stop_when_status_line_is_off(self):
         self.seed_stream(["one", "two"], mode="timer", dwell=1, statusline=False)

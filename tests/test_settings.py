@@ -136,6 +136,41 @@ class SettingsTest(IsolatedStateCase):
             self.assertEqual(fh.read(), contents)
         self.assertEqual(after.st_ino, before.st_ino)
 
+    def test_legacy_backup_is_used_per_key_not_per_first_v04_write(self):
+        original_status = {"type": "command", "command": "npx ccstatusline"}
+        self.write_settings({
+            "spinnerVerbs": {"mode": "replace", "verbs": ["old plugin line"]},
+            "statusLine": {"type": "command", "command": "ours-v03"},
+        })
+        self.tbstate.write_json(self.tbsettings.backup_path(), {
+            "spinnerVerbs": {"mode": "append", "verbs": ["Yarr"]},
+            "statusLine": original_status,
+        })
+        self.tbsettings.set_spinner_line("A v0.4 line.")
+        self.tbsettings.set_statusline("ours-v04")
+        self.tbsettings.restore_statusline(None)
+        self.assertEqual(self.read_settings()["statusLine"], original_status)
+
+    def test_restore_leaves_a_statusline_we_never_wrote_alone(self):
+        self.tbsettings.set_statusline("ours")
+        self.tbsettings.restore_statusline(None)
+        mine = {"type": "command", "command": "npx ccstatusline"}
+        settings = self.read_settings()
+        settings["statusLine"] = mine
+        self.write_settings(settings)
+        self.tbsettings.restore_statusline(None)
+        self.assertEqual(self.read_settings()["statusLine"], mine)
+
+    def test_clear_leaves_one_element_user_spinner_we_never_wrote(self):
+        self.tbsettings.set_spinner_line("ours")
+        self.tbsettings.clear_spinner()
+        mine = {"mode": "replace", "verbs": ["My own single verb"]}
+        settings = self.read_settings()
+        settings["spinnerVerbs"] = mine
+        self.write_settings(settings)
+        self.tbsettings.clear_spinner()
+        self.assertEqual(self.read_settings()["spinnerVerbs"], mine)
+
     def test_clear_preserves_spinner_verbs_changed_after_our_last_write(self):
         self.tbsettings.set_spinner_line("Our line.")
         custom = {"mode": "append", "verbs": ["User edit"]}

@@ -96,6 +96,15 @@ class ConfigTest(IsolatedStateCase):
         self.tbstate.write_json(self.tbstate.path("config.json"), ["not", "an", "object"])
         self.assertEqual(self.tbstate.load_config(), self.tbstate.DEFAULT_CONFIG)
 
+    def test_non_mapping_surfaces_falls_back_to_defaults(self):
+        for bad in (["statusline"], "on", 3):
+            with self.subTest(bad=bad):
+                self.tbstate.write_json(self.tbstate.path("config.json"), {"surfaces": bad})
+                self.assertEqual(
+                    self.tbstate.load_config()["surfaces"],
+                    {"statusline": True, "spinner": True},
+                )
+
     def test_hot_env_quotes_awkward_values(self):
         config = self.tbstate.load_config()
         config["prefix"] = "it's $(rm -rf /) "

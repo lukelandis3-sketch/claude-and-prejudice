@@ -35,6 +35,10 @@ class IdentityTest(unittest.TestCase):
         for command in ("my-own-prompt --fancy", "npx -y ccstatusline@latest", ""):
             self.assertFalse(tb.is_our_statusline(command), command)
 
+    def test_non_string_wrapped_statusline_is_not_ours(self):
+        for value in (42, [], True):
+            self.assertFalse(tb.is_our_statusline(value), repr(value))
+
     def test_an_unrelated_statusline_sh_is_not_ours(self):
         root = os.path.join(self._tmp.name, "someone-else")
         os.makedirs(root)

@@ -227,6 +227,16 @@ class RoundTripTest(IsolatedStateCase):
         self.run_cli("refresh", "off")
         self.assertNotIn("refreshInterval", self.settings()["statusLine"])
 
+    def test_refresh_does_not_take_over_a_third_party_statusline(self):
+        mine = {"type": "command", "command": "my-own-prompt"}
+        with open(self.tbstate.settings_path(), "w") as fh:
+            json.dump({"statusLine": mine}, fh)
+        self.run_cli("load", self.book)
+        result = self.run_cli("refresh", "10")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.settings()["statusLine"], mine)
+        self.assertFalse(os.path.exists(self.tbstate.path("wrapped.cmd")))
+
     def test_queue_holds_several_items_and_reads_them_in_order(self):
         second = os.path.join(self.config_dir, "second.txt")
         with open(second, "w") as fh:

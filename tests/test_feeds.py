@@ -85,6 +85,30 @@ class FeedSeenTest(IsolatedStateCase):
         self.tb.tbstate.write_json(self.tb._feeds_file(), ["not", "an", "object"])
         self.assertEqual(self.tb.load_feeds(), {"feeds": []})
 
+    def test_subscription_added_during_refresh_survives_commit(self):
+        self._write_feed([])
+        original = self.tb._install
+        injected = {"done": False}
+
+        def install_and_add(*args, **kwargs):
+            if not injected["done"]:
+                injected["done"] = True
+                current = self.tb.load_feeds()
+                current["feeds"].append({
+                    "url": "https://new.test/feed", "title": "New",
+                    "last_checked": 0, "seen": [],
+                })
+                self.tb.save_feeds(current)
+            return original(*args, **kwargs)
+
+        self.tb._install = install_and_add
+        try:
+            self.tb.refresh_feeds(force=True)
+        finally:
+            self.tb._install = original
+        urls = [feed["url"] for feed in self.tb.load_feeds()["feeds"]]
+        self.assertIn("https://new.test/feed", urls)
+
 
 class FeedAddTest(IsolatedStateCase):
     def test_feed_add_does_not_block_on_the_network(self):
