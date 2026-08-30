@@ -209,7 +209,29 @@ if [ -n "$HUD" ]; then
     printf '%s\n' "$HUD"
 fi
 if [ -n "$LINE" ]; then
-    printf '%s%s\n' "$TB_PREFIX" "$LINE"
+    BOOK_LINE="${TB_PREFIX}${LINE}"
+    # Claude reserves a few columns around the status line. Keep a readable 100-column
+    # ceiling, honour narrower exported terminal widths, and preserve every word by
+    # wrapping only the uncommon over-long fragment. Short lines spawn no extra process.
+    DISPLAY_WIDTH=${COLUMNS:-108}
+    case "$DISPLAY_WIDTH" in
+        ''|*[!0-9]*) DISPLAY_WIDTH=108 ;;
+    esac
+    [ "${#DISPLAY_WIDTH}" -gt 4 ] && DISPLAY_WIDTH=108
+    if [ "$DISPLAY_WIDTH" -gt 108 ]; then
+        DISPLAY_WIDTH=100
+    elif [ "$DISPLAY_WIDTH" -gt 8 ]; then
+        DISPLAY_WIDTH=$((DISPLAY_WIDTH - 8))
+    fi
+    [ "$DISPLAY_WIDTH" -lt 1 ] && DISPLAY_WIDTH=1
+    if [ "${#BOOK_LINE}" -le "$DISPLAY_WIDTH" ]; then
+        printf '%s\n' "$BOOK_LINE"
+    elif command -v fold >/dev/null 2>&1; then
+        printf '%s\n' "$BOOK_LINE" | fold -s -w "$DISPLAY_WIDTH" 2>/dev/null ||
+            printf '%s\n' "$BOOK_LINE"
+    else
+        printf '%s\n' "$BOOK_LINE"
+    fi
 fi
 
 exit 0

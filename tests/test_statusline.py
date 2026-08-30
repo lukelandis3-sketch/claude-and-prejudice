@@ -77,9 +77,9 @@ class StatusLineTest(IsolatedStateCase):
         self.seed_stream(["one two three four five", long_line, "done"],
                          mode="timer", wpm=250)
         self.tbstate.write_last_advance(time.time() - 2)
-        self.assertEqual(self.run_statusline().stdout.strip(), long_line)
+        self.assertEqual(" ".join(self.run_statusline().stdout.split()), long_line)
         self.tbstate.write_last_advance(time.time() - 4)
-        self.assertEqual(self.run_statusline().stdout.strip(), long_line)
+        self.assertEqual(" ".join(self.run_statusline().stdout.split()), long_line)
         self.assertEqual(self.tbstate.read_pos(), 2)
 
     def test_a_long_idle_costs_one_line_not_hundreds(self):
@@ -119,6 +119,19 @@ class StatusLineTest(IsolatedStateCase):
         config["prefix"] = "book: "
         self.tbstate.save_config(config)
         self.assertEqual(self.run_statusline().stdout.strip(), "book: one")
+
+    def test_long_passage_wraps_without_hiding_words(self):
+        passage = (
+            "Its extreme downtown is the battery, where that noble mole is washed by "
+            "waves, and cooled by breezes, which a few hours previous were out of sight."
+        )
+        self.seed_stream([passage], mode="manual")
+
+        rows = self.run_statusline(env={"COLUMNS": "80"}).stdout.splitlines()
+
+        self.assertGreater(len(rows), 1)
+        self.assertTrue(all(len(row) <= 72 for row in rows), rows)
+        self.assertEqual(" ".join(row.strip() for row in rows), passage)
 
     def test_optional_hud_adds_precomputed_book_progress_above_the_line(self):
         self.seed_stream(["one", "two"], mode="manual")

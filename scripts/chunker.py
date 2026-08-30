@@ -1,8 +1,8 @@
 """Turn arbitrary prose into single-line fragments fit for a spinner or status line.
 
-Sentences are kept whole (a long one is allowed to wrap rather than be cut), except
-where a "sentence" is so long it would swallow the screen -- those are split at clause
-boundaries and, failing that, at word boundaries.
+Sentences are kept whole when they fit the reading surface. Longer ones are split at
+clause boundaries and, failing that, at word boundaries so neither Claude's spinner nor
+its status line hides the end.
 """
 
 import re
@@ -31,7 +31,9 @@ _PARAGRAPH_BREAK = re.compile(r'\n\s*\n+')
 _CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
 _ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 
-DEFAULT_HARD_MAX = 280
+# Claude Code reserves some terminal columns around both reading surfaces. A compact
+# measure also makes each timed fragment readable at a glance instead of spanning the UI.
+DEFAULT_HARD_MAX = 100
 MIN_FRAGMENT = 2
 
 

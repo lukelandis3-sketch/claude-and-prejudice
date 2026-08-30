@@ -214,9 +214,11 @@ Settings files are watched, so the change lands without a restart.
 The status line is the livelier surface. Claude Code re-runs a `statusLine` command **once
 per assistant message**, so it can update several times inside a single turn. `statusline.sh`
 is the hot path: no Python, no JSON parsing, no full-file scans — Python pre-chunks
-immutable 256-line prose shards and publishes them through one atomic generation pointer.
-Optional HUD metadata shards are added atomically beside them. The shell reads one prose
-shard and, only when the HUD is enabled, one matching metadata shard.
+passages to a readable 100-character maximum, stores immutable 256-line prose shards, and
+publishes them through one atomic generation pointer. Optional HUD metadata shards are
+added atomically beside them. The shell reads one prose shard and, only when the HUD is
+enabled, one matching metadata shard. Longer passages from older libraries wrap at the
+terminal edge instead of being clipped, while normal lines keep the same fast path.
 Across 100 invocations on the development Mac at line 25,000 of 25,000, compact manual mode
 measured 7.12 ms median (8.82 ms p95); the 250 WPM timer measured 9.31 ms median
 (10.71 ms p95), and the graphical HUD measured 11.53 ms median (13.14 ms p95), against a

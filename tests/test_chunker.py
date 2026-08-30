@@ -36,6 +36,17 @@ class ChunkerTest(unittest.TestCase):
         for fragment in fragments:
             self.assertLessEqual(len(fragment), 80)
 
+    def test_default_fragments_fit_the_status_line(self):
+        passage = (
+            "Its extreme downtown is the battery, where that noble mole is washed by "
+            "waves, and cooled by breezes, which a few hours previous were out of sight."
+        )
+        fragments = chunker.to_fragments(passage)
+
+        self.assertGreater(len(fragments), 1)
+        self.assertTrue(all(len(fragment) <= 100 for fragment in fragments), fragments)
+        self.assertEqual(" ".join(fragments), passage)
+
     def test_single_word_longer_than_max_is_still_emitted(self):
         fragments = chunker.to_fragments("a" * 200 + " tail.", hard_max=50)
         self.assertTrue(fragments)
