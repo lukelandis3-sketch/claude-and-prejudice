@@ -3,6 +3,6 @@
   "description": "Read a book in the margins of Claude Code: replaces the thinking spinner text and status line with successive lines of whatever you're reading.",
   "version": "0.6.1",
   "author": { "name": "lukelandis3-sketch" },
-  "homepage": "https://github.com/lukelandis3-sketch/claude-code-page-turner",
+  "homepage": "https://github.com/lukelandis3-sketch/claude-code-storyline",
   "keywords": ["reading", "books", "spinner", "statusline", "epub", "gutenberg"]
 }

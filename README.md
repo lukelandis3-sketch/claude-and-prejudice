@@ -1,6 +1,6 @@
-# thinking-book
+# Storyline for Claude Code
 
-Read a book in the margins of Claude Code.
+Turn the status line into a storyline. Read a book in the margins of Claude Code.
 
 This plugin replaces the little words Claude Code shows while it works — *Pondering…*,
 *Percolating…*, *Reticulating…* — with successive lines of whatever you're reading, and
@@ -13,7 +13,7 @@ puts the same line in your status line, where it can turn pages during a turn.
 ## Install
 
 ```
-/plugin marketplace add lukelandis3-sketch/claude-code-page-turner
+/plugin marketplace add lukelandis3-sketch/claude-code-storyline
 /plugin install thinking-book
 ```
 
