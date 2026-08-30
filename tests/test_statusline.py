@@ -121,6 +121,14 @@ class StatusLineTest(IsolatedStateCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "a line")
 
+    def test_large_stdin_and_nonreading_wrapper_stay_silent(self):
+        self.seed_stream(["a line"], mode="manual")
+        self._wrap("exit 0")
+        result = self.run_statusline(stdin_json="x" * (1024 * 1024))
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "a line")
+        self.assertEqual(result.stderr, "")
+
     def test_a_wrapped_command_pointing_back_at_us_cannot_recurse(self):
         # Regression: `pane on` from two different plugin roots used to poison wrapped.cmd
         # with our own script, which then re-read the same file and invoked itself until

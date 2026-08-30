@@ -217,7 +217,8 @@ class ReadwiseTest(unittest.TestCase):
         ]
         groups = readwise.parse_rows(rows, source="fixture.csv")
         self.assertEqual([meta["title"] for meta, _text in groups], ["One", "Two"])
-        self.assertEqual([text for _meta, text in groups], ["First.", "Second."])
+        self.assertEqual(groups[0][1], "First.\n\nNote: n")
+        self.assertEqual(groups[1][1], "Second.")
 
     def test_json_accepts_lowercase_aliases_and_nested_books(self):
         payload = {"books": [{
@@ -308,6 +309,26 @@ class FetchTest(unittest.TestCase):
         with mock.patch("urllib.request.urlopen", return_value=Response()):
             with self.assertRaises(fetch.FetchError):
                 fetch.get("https://example.test/large")
+
+    def test_get_decodes_case_insensitive_gzip_encoding_lists(self):
+        import gzip as gzip_module
+        import fetch
+
+        class Headers(dict):
+            def get_content_charset(self):
+                return "utf-8"
+
+        class Response:
+            headers = Headers({"Content-Encoding": "GZIP, identity"})
+            def __enter__(self):
+                return self
+            def __exit__(self, *_args):
+                return False
+            def read(self, _amount):
+                return gzip_module.compress(b"Readable response.")
+
+        with mock.patch("urllib.request.urlopen", return_value=Response()):
+            self.assertEqual(fetch.get("https://example.test/gzip"), "Readable response.")
 
 
 class PlainTextTest(unittest.TestCase):

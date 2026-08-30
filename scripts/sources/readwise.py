@@ -9,7 +9,6 @@ ALIASES = {
     "title": ("booktitle", "title"),
     "author": ("author",),
     "note": ("note",),
-    "location": ("location",),
 }
 
 
@@ -53,6 +52,9 @@ def parse_rows(rows, source=None):
         text = _value(row, "text")
         if not text:
             continue
+        note = _value(row, "note")
+        if note and note != text:
+            text = "%s\n\nNote: %s" % (text, note)
         title = _value(row, "title") or "Readwise highlights"
         author = _value(row, "author")
         key = (title.casefold(), (author or "").casefold())

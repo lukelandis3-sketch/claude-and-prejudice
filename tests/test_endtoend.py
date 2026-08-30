@@ -120,6 +120,34 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(self.settings()["statusLine"], original)
         self.assertFalse(os.path.exists(self.tbstate.path("wrapped.cmd")))
 
+    def test_each_pane_cycle_snapshots_the_users_current_statusline(self):
+        first = {"type": "command", "command": "first"}
+        second = {"type": "command", "command": "second"}
+        with open(self.tbstate.settings_path(), "w") as fh:
+            json.dump({"statusLine": first}, fh)
+        self.run_cli("pane", "on")
+        self.run_cli("pane", "off")
+        with open(self.tbstate.settings_path(), "w") as fh:
+            json.dump({"statusLine": second}, fh)
+        self.run_cli("pane", "on")
+        self.run_cli("pane", "off")
+        self.assertEqual(self.settings()["statusLine"], second)
+
+    def test_each_on_off_cycle_snapshots_current_spinner_verbs(self):
+        first = {"mode": "append", "verbs": ["First"]}
+        second = {"mode": "append", "verbs": ["Second"]}
+        with open(self.tbstate.settings_path(), "w") as fh:
+            json.dump({"spinnerVerbs": first}, fh)
+        self.run_cli("load", self.book)
+        self.run_cli("off")
+        settings = self.settings()
+        settings["spinnerVerbs"] = second
+        with open(self.tbstate.settings_path(), "w") as fh:
+            json.dump(settings, fh)
+        self.run_cli("on")
+        self.run_cli("off")
+        self.assertEqual(self.settings()["spinnerVerbs"], second)
+
     def test_pane_on_from_two_plugin_roots_does_not_nest(self):
         """The exact sequence that broke a real install: clone first, installed plugin second."""
         import shutil
@@ -281,8 +309,30 @@ class RoundTripTest(IsolatedStateCase):
         result = self.run_cli("open", "Sea")
         self.assertEqual(result.returncode, 1)
         self.assertIn("ambiguous", result.stderr)
-        self.assertIn("a", result.stderr)
-        self.assertIn("b", result.stderr)
+        self.assertIn("(a)", result.stderr)
+        self.assertIn("(b)", result.stderr)
+
+    def test_open_prefers_an_exact_title_and_clamps_stale_bookmark(self):
+        self.tbstate.save_item("a", {"title": "Sea", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "Deep Sea", "kind": "book"}, ["b1"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        self.tbstate.write_pos(3)
+        self.tbstate.write_json(self.tbstate.path("bookmarks.json"), {"a": 500})
+        result = self.run_cli("open", "Sea")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("line 2", result.stdout)
+        self.assertEqual(self.tbstate.load_bookmarks()["a"], 2)
+
+    def test_import_after_off_stays_off(self):
+        self.run_cli("load", self.book)
+        self.run_cli("off")
+        another = os.path.join(self.config_dir, "another.txt")
+        with open(another, "w") as fh:
+            fh.write("Another readable sentence.")
+        result = self.run_cli("load", another)
+        self.assertIn("run /book on", result.stdout)
+        self.assertTrue(self.tbstate.load_config()["paused"])
 
     def test_clippings_batch_reimport_is_stable_across_file_paths(self):
         content = ("Book One (Author A)\n- Your Highlight\n\nFirst highlight.\n==========\n"

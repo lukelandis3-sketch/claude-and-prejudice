@@ -56,6 +56,13 @@ def statusline_command():
     return 'sh "%s"' % os.path.join(plugin_root(), "scripts", "statusline.sh")
 
 
+def statusline_live_path():
+    session_id = os.environ.get("CLAUDE_CODE_SESSION_ID") or "global"
+    if not re.match(r"^[A-Za-z0-9_-]+$", session_id):
+        session_id = "global"
+    return tbstate.path("statusline.live." + session_id)
+
+
 def current_line():
     return tbstate.stream_line(tbstate.read_pos())
 
@@ -375,7 +382,7 @@ def enable_statusline(auto=False):
     Returns (enabled, reason) for the interactive caller's concise notice.
     """
     config = tbstate.load_config()
-    enabled, original, _settings = tbsettings.install_statusline(
+    enabled, original, _settings, changed = tbsettings.install_statusline(
         statusline_command(), is_our_statusline, auto=auto,
         refresh_interval=config.get("statusline_refresh_interval"),
     )
@@ -388,7 +395,7 @@ def enable_statusline(auto=False):
 
     config = tbstate.update_config(mutate)
     _write_wrapped(config.get("wrapped_statusline"))
-    return True, "enabled"
+    return True, "enabled" if changed else "already enabled"
 
 
 def after_interactive_import():
@@ -402,9 +409,9 @@ def after_interactive_import():
     if not config["surfaces"]["statusline"]:
         return
     enabled, reason = enable_statusline(auto=True)
-    if enabled:
+    if enabled and reason == "enabled":
         print("Reading surface enabled; restart Claude Code once if the status line is not visible yet.")
-    elif reason:
+    elif not enabled and reason:
         print("A status line is already configured; /book pane on will add the book alongside it.")
 
 
@@ -425,7 +432,7 @@ def cmd_pane(args):
         wrapped = holder["wrapped"]
         _write_wrapped(None)
         tbsettings.restore_statusline(wrapped)
-        print("Status line reading surface disabled." + (" Your own status line is back." if wrapped else ""))
+        print("Status line reading surface disabled. The original or newer user status line is in place.")
     else:
         raise SystemExit("usage: /book pane on|off")
 
@@ -578,7 +585,8 @@ def cmd_open(args):
     query = " ".join(args).strip()
     rows = tbstate.load_index()
     exact = [row for row in rows if row[1] == query]
-    matches = exact or [row for row in rows if query.lower() in row[3].lower()]
+    exact_title = [row for row in rows if row[3].casefold() == query.casefold()]
+    matches = exact or exact_title or [row for row in rows if query.casefold() in row[3].casefold()]
     if not matches:
         raise SystemExit("no queued item matches %r; run /book queue for ids." % query)
     if len(matches) > 1:
@@ -592,6 +600,8 @@ def cmd_open(args):
         position = tbstate.resolve_position(item_id, offset)
         tbstate.write_pos(position or 1)
         tbstate.write_last_advance()
+        resolved = tbstate.locate_position(position or 1)
+        offset = resolved[1] if resolved else 1
         tbstate.save_bookmark(item_id, offset)
     sync_spinner()
     print("Opened %s at line %d: %s" % (title, offset, current_line() or "(blank)"))
@@ -637,7 +647,7 @@ def cmd_off(_args):
     _write_wrapped(None)
     tbsettings.clear_spinner()
     tbsettings.restore_statusline(wrapped)
-    print("thinking-book is off. Stock spinner verbs restored." + (" Your status line is back." if wrapped else ""))
+    print("thinking-book is off. Plugin overrides were removed; newer user edits were left untouched.")
 
 
 def cmd_on(_args):
@@ -712,6 +722,17 @@ def cmd_version(_args):
     print("running from %s" % plugin_root())
 
 
+def print_help():
+    print("Read something now: /book gutenberg <title> or /book load <file.epub>")
+    print("Then: /book status · /book open <book> · /book pause · /book off")
+    print("Sources: read <url> · clippings <file> · readwise <export> · libby <export> · feed")
+    print("All commands: %s" % ", ".join(sorted(COMMANDS)))
+
+
+def cmd_help(_args):
+    print_help()
+
+
 # ---------------------------------------------------------------------------- hooks
 
 def _feeds_due():
@@ -753,13 +774,14 @@ def cmd_sync(args):
     tbstate.ensure_home()
     tbsettings.ensure_settings_file()
     try:
-        os.unlink(tbstate.path("statusline.live"))
+        os.unlink(statusline_live_path())
     except OSError:
         pass
     config = tbstate.load_config()
     tbstate.write_hot_env(config)
     if tbstate.stream_count() == 0 or not tbstate.stream_generation():
-        tbstate.rebuild_stream()
+        with tbstate.locked():
+            tbstate.rebuild_stream()
     sync_spinner(config)
     if not config["paused"] and _feeds_due():
         try:
@@ -785,7 +807,7 @@ def cmd_advance(args):
     mode = config["mode"]
     if mode == "turn":
         advance_by(1)
-    elif mode == "timer" and not os.path.exists(tbstate.path("statusline.live")):
+    elif mode == "timer" and not os.path.exists(statusline_live_path()):
         last = tbstate.read_last_advance()
         if not last:
             # Cold start: show this line and start the clock rather than skipping it.
@@ -808,7 +830,7 @@ COMMANDS = {
     "feed": cmd_feed, "queue": cmd_queue, "open": cmd_open, "status": cmd_status, "mode": cmd_mode,
     "dwell": cmd_dwell, "pause": cmd_pause, "resume": cmd_resume, "pane": cmd_pane,
     "on": cmd_on, "off": cmd_off, "next": cmd_next, "back": cmd_back, "line": cmd_line,
-    "repair": cmd_repair, "refresh": cmd_refresh, "version": cmd_version,
+    "repair": cmd_repair, "refresh": cmd_refresh, "version": cmd_version, "help": cmd_help,
     "reader": cmd_reader, "install-cli": cmd_install_cli,
     "sync": cmd_sync, "advance": cmd_advance, "restore": cmd_restore,
     "refresh-feeds": cmd_refresh_feeds,
@@ -863,10 +885,7 @@ def main(argv):
         argv = argv[:keep] + [a for a in argv[keep:] if not _looks_like_a_slash_command(a)]
 
     if not argv:
-        print("Read something now: /book gutenberg <title> or /book load <file.epub>")
-        print("Then: /book status · /book open <book> · /book pause · /book off")
-        print("Sources: read <url> · clippings <file> · readwise <export> · libby <export> · feed")
-        print("All commands: %s" % ", ".join(sorted(COMMANDS)))
+        print_help()
         return 0
 
     name, args = argv[0], argv[1:]

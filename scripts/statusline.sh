@@ -19,6 +19,11 @@ TB_IN_STATUSLINE=1
 export TB_IN_STATUSLINE
 
 TB_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/thinking-book"
+TB_SESSION_ID=${CLAUDE_CODE_SESSION_ID:-global}
+case "$TB_SESSION_ID" in
+    ''|*[!A-Za-z0-9_-]*) TB_SESSION_ID=global ;;
+esac
+TB_LIVE_MARKER="$TB_DIR/statusline.live.$TB_SESSION_ID"
 
 # Claude Code pipes session JSON on stdin. Retain it only when a wrapped status line
 # needs the bytes; otherwise drain it without a command-substitution copy in memory.
@@ -35,7 +40,7 @@ emit_wrapped() {
     [ "$HAS_WRAPPED" = "1" ] || return 0
     wrapped=$(cat "$TB_DIR/wrapped.cmd" 2>/dev/null) || return 0
     [ -n "$wrapped" ] || return 0
-    printf '%s' "$STDIN_JSON" | sh -c "$wrapped" 2>/dev/null || true
+    { printf '%s' "$STDIN_JSON" | sh -c "$wrapped"; } 2>/dev/null || true
 }
 
 # Without state there is nothing to read, but a wrapped status line must still render.
@@ -55,8 +60,8 @@ TB_PREFIX=''
 # Presence means this surface has actually run in the current Claude Code session. The
 # SessionStart hook removes it. A statusLine settings entry alone is not proof of life:
 # newly installed commands may not mount until Claude Code restarts.
-if [ "$TB_STATUSLINE" = "1" ] && [ ! -f "$TB_DIR/statusline.live" ]; then
-    : > "$TB_DIR/statusline.live" 2>/dev/null || true
+if [ "$TB_STATUSLINE" = "1" ] && [ ! -f "$TB_LIVE_MARKER" ]; then
+    : > "$TB_LIVE_MARKER" 2>/dev/null || true
 fi
 
 read_int() {

@@ -42,7 +42,8 @@ def get(url, accept="*/*", timeout=TIMEOUT):
                     "response from %s exceeds the %d MB safety limit"
                     % (url, MAX_BYTES // 1024 // 1024)
                 )
-            if response.headers.get("Content-Encoding") == "gzip":
+            encodings = (response.headers.get("Content-Encoding") or "").casefold()
+            if "gzip" in (value.strip() for value in encodings.split(",")):
                 raw = _bounded_gunzip(raw)
             charset = response.headers.get_content_charset() or "utf-8"
     except urllib.error.HTTPError as exc:

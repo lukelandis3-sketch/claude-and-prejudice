@@ -102,14 +102,14 @@ def _legacy_original(key):
     return _MISSING
 
 
-def _remember_origins(settings, keys):
+def _remember_origins(settings, keys, use_legacy=False):
     origins = tbstate.read_json(origins_path(), {})
     changed = False
     for key in keys:
         if key in origins:
             continue
         legacy = _legacy_original(key)
-        if os.path.exists(backup_path()):
+        if use_legacy:
             present, value = legacy is not _MISSING, legacy
         else:
             present, value = key in settings, settings.get(key)
@@ -119,6 +119,26 @@ def _remember_origins(settings, keys):
         changed = True
     if changed:
         tbstate.write_json(origins_path(), origins)
+
+
+def _retire(keys):
+    """End one enable/restore cycle so the next activation snapshots fresh values."""
+    origins = tbstate.read_json(origins_path(), {})
+    written = tbstate.read_json(written_path(), {})
+    origins_changed = written_changed = False
+    for key in keys:
+        if isinstance(origins, dict) and key in origins:
+            origins.pop(key)
+            origins_changed = True
+        if isinstance(written, dict) and key in written:
+            written.pop(key)
+            written_changed = True
+    # Keep the files (even empty) to distinguish a completed migration cycle from a
+    # pre-v0.4 install that has only settings.backup.json.
+    if origins_changed or not os.path.exists(origins_path()):
+        tbstate.write_json(origins_path(), origins if isinstance(origins, dict) else {})
+    if written_changed or not os.path.exists(written_path()):
+        tbstate.write_json(written_path(), written if isinstance(written, dict) else {})
 
 
 def _original(key, fallback=_MISSING):
@@ -141,7 +161,7 @@ def _last_written(key):
     return written.get(key, _MISSING) if isinstance(written, dict) else _MISSING
 
 
-def update(mutator, touched=(), record_key=None):
+def update(mutator, touched=(), record_key=None, retire=()):
     """Read-modify-write settings.json under a lock, backing it up before the first edit.
 
     `mutator` receives the settings dict and mutates it in place.
@@ -152,15 +172,20 @@ def update(mutator, touched=(), record_key=None):
         before = json.loads(json.dumps(settings))
         mutator(settings)
         if settings == before:
+            if retire:
+                _retire(retire)
             return settings, False
         with open(tbstate.settings_path(), "rb") as fh:
             raw = fh.read()
         _raw_backup_once(raw)
+        legacy = os.path.exists(backup_path()) and not os.path.exists(origins_path())
         _backup_once(before)
-        _remember_origins(before, touched)
+        _remember_origins(before, touched, use_legacy=legacy)
         tbstate.write_json(tbstate.settings_path(), settings)
         if record_key is not None:
             _record_written(record_key, settings[record_key])
+        if retire:
+            _retire(retire)
         return settings, True
 
 
@@ -210,7 +235,7 @@ def clear_spinner():
         else:
             settings.pop(SPINNER_KEY, None)
 
-    settings, _changed = update(mutate)
+    settings, _changed = update(mutate, retire=(SPINNER_KEY,))
     return settings
 
 
@@ -271,11 +296,11 @@ def install_statusline(command, is_ours, auto=False, refresh_interval=None):
         settings[STATUSLINE_KEY] = entry
         outcome["enabled"] = True
 
-    settings, _changed = update(
+    settings, changed = update(
         mutate, touched=(STATUSLINE_KEY,),
         record_key=STATUSLINE_KEY,
     )
-    return outcome["enabled"], outcome["original"], settings
+    return outcome["enabled"], outcome["original"], settings, changed
 
 
 def restore_statusline(original):
@@ -293,7 +318,7 @@ def restore_statusline(original):
         else:
             settings.pop(STATUSLINE_KEY, None)
 
-    settings, _changed = update(mutate)
+    settings, _changed = update(mutate, retire=(STATUSLINE_KEY,))
     return settings
 
 

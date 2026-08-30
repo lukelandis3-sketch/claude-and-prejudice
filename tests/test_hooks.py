@@ -82,7 +82,7 @@ class HookTest(IsolatedStateCase):
         self.seed_stream(["one", "two"], mode="timer", dwell=600, statusline=True)
         self.tbstate.write_last_advance(time.time())
         self.run_statusline()
-        self.assertTrue(os.path.exists(self.tbstate.path("statusline.live")))
+        self.assertTrue(os.path.exists(self.tbstate.path("statusline.live.global")))
         self.tbstate.write_last_advance(time.time() - 1000)
         self.run_cli("advance")
         self.assertEqual(self.pos(), 1)
@@ -133,9 +133,18 @@ class HookTest(IsolatedStateCase):
 
     def test_sync_clears_the_previous_sessions_statusline_liveness(self):
         self.seed_stream(["one"])
-        self.tbstate.atomic_write(self.tbstate.path("statusline.live"), "")
+        self.tbstate.atomic_write(self.tbstate.path("statusline.live.global"), "")
         self.run_cli("sync", "--quiet")
-        self.assertFalse(os.path.exists(self.tbstate.path("statusline.live")))
+        self.assertFalse(os.path.exists(self.tbstate.path("statusline.live.global")))
+
+    def test_statusline_liveness_is_scoped_by_session_id_when_available(self):
+        self.seed_stream(["one", "two"], mode="timer", dwell=600, statusline=True)
+        self.tbstate.write_last_advance(time.time())
+        self.run_statusline(env={"CLAUDE_CODE_SESSION_ID": "session-a"})
+        self.assertTrue(os.path.exists(self.tbstate.path("statusline.live.session-a")))
+        self.tbstate.write_last_advance(time.time() - 1000)
+        self.run_cli("advance", "--quiet", env={"CLAUDE_CODE_SESSION_ID": "session-b"})
+        self.assertEqual(self.pos(), 2)
 
     # ------------------------------------------------------------------- robustness
 
@@ -184,6 +193,18 @@ class HookTest(IsolatedStateCase):
         self.assertIn("All commands:", result.stdout)
         self.assertIn("Read something now", result.stdout)
         self.assertNotIn("unknown command", result.stderr)
+
+    def test_help_command_prints_task_oriented_help(self):
+        result = self.run_cli("help")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Read something now", result.stdout)
+
+    def test_manual_hook_does_not_rewrite_an_unchanged_spinner(self):
+        self.seed_stream(["one"], mode="manual")
+        self.run_cli("sync", "--quiet")
+        before = os.stat(self.tbstate.settings_path()).st_ino
+        self.run_cli("advance", "--quiet")
+        self.assertEqual(os.stat(self.tbstate.settings_path()).st_ino, before)
 
     def test_unknown_command_is_an_error_not_a_crash(self):
         result = self.run_cli("nonsense")
