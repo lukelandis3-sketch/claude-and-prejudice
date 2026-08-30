@@ -17,14 +17,15 @@ puts the same line in your status line, where it can turn pages during a turn.
 /plugin install thinking-book
 ```
 
-Then pick something to read and turn on the status line surface:
+Then pick something to read:
 
 ```
 /book gutenberg moby dick
-/book pane on
 ```
 
-Restart Claude Code once so the status line takes effect.
+The first import enables an empty status-line slot automatically. If you already have a
+status line, thinking-book leaves it alone and tells you to opt in with `/book pane on`,
+which runs both. Restart Claude Code once if a newly enabled status line is not visible.
 
 ## Reading
 
@@ -37,11 +38,12 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 | `/thinking-book:b` | Back one line |
 | `/book status` | Title, author, position, percent read, current line |
 | `/book queue` | What's queued, and what you're in the middle of |
+| `/book open <id-or-title>` | Switch books; each one keeps its own bookmark |
 | `/book mode timer\|turn\|manual` | How pages turn (below) |
 | `/book dwell <seconds>` | Reading pace for timer mode (default 8) |
 | `/book pause` / `/book resume` | Freeze on a line, or carry on |
+| `/book on` / `/book off` | Enable both reading surfaces, or restore the originals |
 | `/book pane on\|off` | Attach or detach the status line surface |
-| `/book off` | Full stop — stock spinner verbs and your own status line back |
 | `/book repair` | Undo a self-wrapped status line (see below) |
 | `/book version` | Which version is running, and from which directory |
 | `/book refresh <secs\|off>` | Set `statusLine.refreshInterval` where your version supports it |
@@ -122,6 +124,8 @@ Adjust the path to wherever the plugin is installed.
 | `/book read <url>` | A web article | Full sequential prose |
 | `/book feed add <url>` | An RSS or Atom feed | New articles, queued automatically |
 | `/book libby <export.json>` | A Libby *Reading Journey* export | Your highlights |
+| `/book clippings <My Clippings.txt>` | Your Kindle's local clippings export | Highlights and notes, grouped by book |
+| `/book readwise <export.csv\|export.json>` | A Readwise data export | Highlights, grouped by book |
 
 Items form a queue and are read in order; when one runs out the next begins. Feeds top the
 queue up at session start, in the background, at most three new articles per feed per hour.
@@ -144,9 +148,8 @@ encrypted EPUB is rejected with an explanation rather than worked around. For se
 prose, use DRM-free copies (Standard Ebooks, No Starch, O'Reilly, most Humble bundles),
 the public domain, or the open web.
 
-Readwise and Kindle's `My Clippings.txt` are not supported yet. Every importer implements
-the same `load(arg) -> (meta, fragments)` interface, so both would slot in without
-touching anything else.
+`My Clippings.txt` and Readwise imports are offline and contain only excerpts the user
+exported. They do not read or decrypt Kindle book files.
 
 ## How it works
 
@@ -163,12 +166,13 @@ Settings files are watched, so the change lands without a restart.
 The status line is the livelier surface. Claude Code re-runs a `statusLine` command **once
 per assistant message**, so it updates several times inside a single turn. `statusline.sh`
 is the hot path: no Python, no JSON parsing, no full-file scans — Python pre-chunks
-everything at import into one flat stream file, and the shell does a single indexed lookup.
-It measures ~10 ms even at line 25,000 of a 25,000-line novel, against a 5 s timeout.
+immutable 256-line shards and publishes them through one atomic generation pointer. The
+shell reads at most one shard. On the development Mac it measures 8.82 ms median / 9.62 ms
+p90 at line 25,000 of 25,000 over 100 warm invocations, against a 5 s timeout.
 
 State lives in `~/.claude/thinking-book/`. JSON files are the human-readable record;
-flat one-value files (`pos`, `last`, `count`, `hot.env`) exist so the hot path can read
-them with a single `cat`.
+flat one-value files (`pos`, `last`, `count`, `hot.env`) and immutable stream shards keep
+the hot path to shell builtins plus one bounded lookup.
 
 ## Honest limitations
 
@@ -192,13 +196,15 @@ them with a single `cat`.
 - **An in-progress todo outranks the spinner verb**, so reading pauses during todo work.
 - **`disableAllHooks: true` disables the status line too**, and the plugin goes dark.
 - **Concurrent sessions** share one global setting and will interleave each other's lines.
-  Locking keeps the bookmark consistent, so nothing is lost.
+  Locking keeps state valid; a status-line page turn can race a queue rebuild by at most
+  one line because portable POSIX `sh` cannot take Python's `flock` on macOS.
 - **`refreshInterval` may not exist in your version.** Claude Code 2.1.251 has no such key,
   so `/book refresh` is a no-op there; other versions (and tools like ccstatusline) do use
   it. Harmless either way — unknown settings keys are ignored.
-- **Your `settings.json` gets reformatted** on first write. A copy of the original is kept
-  at `~/.claude/thinking-book/settings.backup.json`, and `/book off` restores every key
-  the plugin touched.
+- **Your `settings.json` gets reformatted** on first actual change. The original bytes are
+  kept at `~/.claude/thinking-book/settings.backup.raw` for v0.4+ installs, and `/book off`
+  restores every value the plugin touched, including missing, null, and custom values.
+  Malformed settings are never replaced; the command names the file to repair.
 
 `spinnerVerbs` and `statusLine` are documented settings. Single-element sampling is
 inference from the current implementation — if a future release re-picks verbs on a timer,
