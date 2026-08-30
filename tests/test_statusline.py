@@ -18,6 +18,11 @@ class StatusLineTest(IsolatedStateCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "Call me Ishmael.")
 
+    def test_numeric_cursor_without_final_newline_is_still_read(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        self.tbstate.atomic_write(self.tbstate.path("pos"), "2")
+        self.assertEqual(self.run_statusline().stdout.strip(), "two")
+
     def test_reads_first_and_last_lines_across_shards(self):
         lines = ["line-%d" % n for n in range(1, 515)]
         self.seed_stream(lines, mode="manual")

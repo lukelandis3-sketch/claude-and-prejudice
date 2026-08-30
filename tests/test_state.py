@@ -1,3 +1,4 @@
+import os
 import unittest
 
 from support import IsolatedStateCase
@@ -39,6 +40,20 @@ class StreamTest(IsolatedStateCase):
         self.assertEqual(self.tbstate.rebuild_stream(), 1)
         self.assertEqual(self.tbstate.item_at(1)[1], "real")
 
+    def test_metadata_newlines_cannot_corrupt_the_stream_index(self):
+        self.tbstate.save_item("a", {"title": "Bad\nTitle", "kind": "book"}, ["a1"])
+        self.tbstate.save_queue({"items": ["a"]})
+        self.tbstate.rebuild_stream()
+        self.assertEqual(self.tbstate.item_at(1)[3], "Bad Title")
+
+    def test_corrupt_generation_cannot_traverse_outside_stream_directory(self):
+        outside = os.path.join(self.config_dir, "outside")
+        os.makedirs(outside)
+        os.makedirs(self.tbstate.path("stream-generations"))
+        self.tbstate.atomic_write(os.path.join(outside, "0.txt"), "not book data\n")
+        self.tbstate.atomic_write(self.tbstate.path("stream.gen"), "../../outside\n")
+        self.assertEqual(self.tbstate.stream_line(1), "")
+
     def test_stream_generation_handles_shard_boundaries(self):
         lines = ["line-%d" % n for n in range(1, 515)]
         self.seed_stream(lines, mode="manual")
@@ -76,6 +91,10 @@ class ConfigTest(IsolatedStateCase):
     def test_corrupt_config_does_not_raise(self):
         self.tbstate.atomic_write(self.tbstate.path("config.json"), "{ not json")
         self.assertEqual(self.tbstate.load_config()["mode"], "timer")
+
+    def test_valid_non_object_config_falls_back_to_defaults(self):
+        self.tbstate.write_json(self.tbstate.path("config.json"), ["not", "an", "object"])
+        self.assertEqual(self.tbstate.load_config(), self.tbstate.DEFAULT_CONFIG)
 
     def test_hot_env_quotes_awkward_values(self):
         config = self.tbstate.load_config()

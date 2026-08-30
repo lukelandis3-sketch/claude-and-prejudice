@@ -70,6 +70,21 @@ class FeedSeenTest(IsolatedStateCase):
         seen = self.tb.load_feeds()["feeds"][0]["seen"]
         self.assertEqual(len(seen), len(set(seen)))
 
+    def test_failed_install_is_not_marked_seen_so_it_can_retry(self):
+        self._write_feed([])
+        original = self.tb._install
+        self.tb._install = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
+        try:
+            self.tb.refresh_feeds(force=True)
+        finally:
+            self.tb._install = original
+        seen = self.tb.load_feeds()["feeds"][0]["seen"]
+        self.assertNotIn(self.entries[0]["link"], seen)
+
+    def test_valid_non_object_feeds_file_is_treated_as_empty(self):
+        self.tb.tbstate.write_json(self.tb._feeds_file(), ["not", "an", "object"])
+        self.assertEqual(self.tb.load_feeds(), {"feeds": []})
+
 
 class FeedAddTest(IsolatedStateCase):
     def test_feed_add_does_not_block_on_the_network(self):
