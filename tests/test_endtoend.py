@@ -284,6 +284,30 @@ class RoundTripTest(IsolatedStateCase):
         self.assertIn("a", result.stderr)
         self.assertIn("b", result.stderr)
 
+    def test_clippings_batch_reimport_is_stable_across_file_paths(self):
+        content = ("Book One (Author A)\n- Your Highlight\n\nFirst highlight.\n==========\n"
+                   "Book Two (Author B)\n- Your Highlight\n\nSecond highlight.\n==========")
+        first = os.path.join(self.config_dir, "My Clippings.txt")
+        second = os.path.join(self.config_dir, "Copy.txt")
+        for path in (first, second):
+            with open(path, "w") as fh:
+                fh.write(content)
+        result = self.run_cli("clippings", first)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("2 highlight book", result.stdout)
+        ids = list(self.tbstate.load_queue()["items"])
+        self.run_cli("clippings", second)
+        self.assertEqual(self.tbstate.load_queue()["items"], ids)
+
+    def test_readwise_csv_imports_in_one_batch(self):
+        path = os.path.join(self.config_dir, "readwise.csv")
+        with open(path, "w") as fh:
+            fh.write("Book Title,Author,Highlight\nOne,A,First highlight.\nTwo,B,Second highlight.\n")
+        result = self.run_cli("readwise", path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("2 highlight book", result.stdout)
+        self.assertEqual(len(self.tbstate.load_queue()["items"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

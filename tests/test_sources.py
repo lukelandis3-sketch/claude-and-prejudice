@@ -6,10 +6,12 @@ import unittest
 import support
 
 import article
+import clippings
 import epub
 import feed
 import gutenberg
 import libby
+import readwise
 
 
 class EpubTest(unittest.TestCase):
@@ -174,6 +176,59 @@ class LibbyTest(unittest.TestCase):
         path = self._write({"title": "Empty", "highlights": []})
         with self.assertRaises(LookupError):
             libby.load(path)
+
+
+class ClippingsTest(unittest.TestCase):
+    def test_groups_books_handles_bom_crlf_localized_metadata_and_dedupes(self):
+        raw = ("\ufeffBook One (Author A)\r\n"
+               "- Votre surlignement à la page 1\r\n\r\n"
+               "First highlight.\r\n==========\r\n"
+               "Book One (Author A)\r\n- Your Highlight\r\n\r\n"
+               "First   highlight.\r\n==========\r\n"
+               "Book Two (Author B)\r\n- Your Highlight\r\n\r\n"
+               "Second highlight.\r\n==========\r\n"
+               "Book Two (Author B)\r\n- Your Bookmark\r\n\r\n==========")
+        groups = clippings.parse(raw, source="fixture")
+        self.assertEqual([meta["title"] for meta, _text in groups], ["Book One", "Book Two"])
+        self.assertEqual(groups[0][1], "First highlight.")
+        self.assertEqual(groups[1][1], "Second highlight.")
+        self.assertTrue(all(meta["kind"] == "highlights" for meta, _text in groups))
+
+    def test_no_highlights_raises(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "My Clippings.txt")
+            with open(path, "w") as fh:
+                fh.write("Book (A)\n- Your Bookmark\n\n==========")
+            with self.assertRaises(LookupError):
+                clippings.load(path)
+
+
+class ReadwiseTest(unittest.TestCase):
+    def test_csv_accepts_named_column_aliases_and_groups_books(self):
+        rows = [
+            {"Book Title": "One", "Author": "A", "Highlight": "First.", "Note": "n"},
+            {"Book Title": "Two", "Author": "B", "Highlight": "Second.", "Location": "2"},
+        ]
+        groups = readwise.parse_rows(rows, source="fixture.csv")
+        self.assertEqual([meta["title"] for meta, _text in groups], ["One", "Two"])
+        self.assertEqual([text for _meta, text in groups], ["First.", "Second."])
+
+    def test_json_accepts_lowercase_aliases_and_nested_books(self):
+        payload = {"books": [{
+            "title": "Nested", "author": "Writer",
+            "highlights": [{"text": "A nested highlight."}],
+        }]}
+        rows = readwise._json_rows(payload)
+        groups = readwise.parse_rows(rows)
+        self.assertEqual(groups[0][0]["title"], "Nested")
+        self.assertEqual(groups[0][1], "A nested highlight.")
+
+    def test_exact_duplicates_are_removed(self):
+        groups = readwise.parse_rows([
+            {"title": "One", "text": "Same."},
+            {"title": "One", "text": " Same. "},
+        ])
+        self.assertEqual(groups[0][1], "Same.")
 
 
 class ArticleTest(unittest.TestCase):

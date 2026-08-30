@@ -105,6 +105,38 @@ def _install(item_id, meta, text, announce=True):
     return item_id, len(fragments)
 
 
+def _install_many(kind, items):
+    """Install a multi-book export with one lock, rebuild, and summary."""
+    prepared = []
+    for meta, text in items:
+        fragments = chunker.to_fragments(text)
+        if not fragments:
+            continue
+        identity = "%s\0%s" % (
+            (meta.get("title") or "").strip().casefold(),
+            (meta.get("author") or "").strip().casefold(),
+        )
+        prepared.append((_slug(kind, identity), meta, fragments))
+    if not prepared:
+        raise LookupError("nothing readable found in the export")
+
+    with tbstate.locked():
+        logical = tbstate.capture_position()
+        queue = tbstate.load_queue()
+        old_items = list(queue["items"])
+        for item_id, meta, fragments in prepared:
+            tbstate.save_item(item_id, meta, fragments)
+            if item_id not in queue["items"]:
+                queue["items"].append(item_id)
+        tbstate.save_queue(queue)
+        tbstate.rebuild_stream()
+        tbstate.restore_position(logical, old_items=old_items)
+
+    total = sum(len(row[2]) for row in prepared)
+    print("Queued %d highlight book(s) -- %d fragments." % (len(prepared), total))
+    return [row[0] for row in prepared]
+
+
 def cmd_load(args):
     if not args:
         raise SystemExit("usage: /book load <path.epub|path.txt>")
@@ -140,6 +172,24 @@ def cmd_libby(args):
     path = os.path.abspath(os.path.expanduser(args[0]))
     meta, text = libby.load(path)
     _install(_slug("libby", path), meta, text)
+    after_interactive_import()
+
+
+def cmd_clippings(args):
+    if not args:
+        raise SystemExit("usage: /book clippings <My Clippings.txt>")
+    import clippings
+    path = os.path.abspath(os.path.expanduser(args[0]))
+    _install_many("clippings", clippings.load(path))
+    after_interactive_import()
+
+
+def cmd_readwise(args):
+    if not args:
+        raise SystemExit("usage: /book readwise <export.csv|export.json>")
+    import readwise
+    path = os.path.abspath(os.path.expanduser(args[0]))
+    _install_many("readwise", readwise.load(path))
     after_interactive_import()
 
 
@@ -748,7 +798,8 @@ def cmd_restore(args):
 
 
 COMMANDS = {
-    "load": cmd_load, "gutenberg": cmd_gutenberg, "libby": cmd_libby, "read": cmd_read,
+    "load": cmd_load, "gutenberg": cmd_gutenberg, "libby": cmd_libby,
+    "clippings": cmd_clippings, "readwise": cmd_readwise, "read": cmd_read,
     "feed": cmd_feed, "queue": cmd_queue, "open": cmd_open, "status": cmd_status, "mode": cmd_mode,
     "dwell": cmd_dwell, "pause": cmd_pause, "resume": cmd_resume, "pane": cmd_pane,
     "on": cmd_on, "off": cmd_off, "next": cmd_next, "back": cmd_back, "line": cmd_line,
