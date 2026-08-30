@@ -70,14 +70,39 @@ class FeedSeenTest(IsolatedStateCase):
         seen = self.tb.load_feeds()["feeds"][0]["seen"]
         self.assertEqual(len(seen), len(set(seen)))
 
+    def test_multiple_new_articles_publish_one_stream_generation(self):
+        self._write_feed([])
+        original = self.tb.tbstate.rebuild_stream
+        calls = []
+
+        def counted(*args, **kwargs):
+            calls.append(1)
+            return original(*args, **kwargs)
+
+        self.tb.tbstate.rebuild_stream = counted
+        try:
+            added = self.tb.refresh_feeds(force=True)
+        finally:
+            self.tb.tbstate.rebuild_stream = original
+        self.assertEqual(added, 3)
+        self.assertEqual(len(calls), 1)
+
+    def test_duplicate_article_links_are_staged_once(self):
+        self.entries = [self.entries[0], dict(self.entries[0])]
+        self._write_feed([])
+        added = self.tb.refresh_feeds(force=True)
+        self.assertEqual(added, 1)
+        self.assertEqual(self.tb.load_feeds()["feeds"][0]["seen"],
+                         [self.entries[0]["link"]])
+
     def test_failed_install_is_not_marked_seen_so_it_can_retry(self):
         self._write_feed([])
-        original = self.tb._install
-        self.tb._install = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
+        original = self.tb._install_prepared
+        self.tb._install_prepared = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full"))
         try:
             self.tb.refresh_feeds(force=True)
         finally:
-            self.tb._install = original
+            self.tb._install_prepared = original
         seen = self.tb.load_feeds()["feeds"][0]["seen"]
         self.assertNotIn(self.entries[0]["link"], seen)
 
@@ -87,7 +112,7 @@ class FeedSeenTest(IsolatedStateCase):
 
     def test_subscription_added_during_refresh_survives_commit(self):
         self._write_feed([])
-        original = self.tb._install
+        original = self.tb._install_prepared
         injected = {"done": False}
 
         def install_and_add(*args, **kwargs):
@@ -101,11 +126,11 @@ class FeedSeenTest(IsolatedStateCase):
                 self.tb.save_feeds(current)
             return original(*args, **kwargs)
 
-        self.tb._install = install_and_add
+        self.tb._install_prepared = install_and_add
         try:
             self.tb.refresh_feeds(force=True)
         finally:
-            self.tb._install = original
+            self.tb._install_prepared = original
         urls = [feed["url"] for feed in self.tb.load_feeds()["feeds"]]
         self.assertIn("https://new.test/feed", urls)
 

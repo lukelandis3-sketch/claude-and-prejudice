@@ -6,12 +6,8 @@ hook-facing subcommand exits 0 no matter what goes wrong: a bad book must never 
 to block a turn or break a status line.
 """
 
-import hashlib
-import json
 import os
 import re
-import shlex
-import shutil
 import sys
 import time
 
@@ -20,7 +16,6 @@ for candidate in (HERE, os.path.join(HERE, "sources")):
     if candidate not in sys.path:
         sys.path.insert(0, candidate)
 
-import chunker
 import settings as tbsettings
 import tbstate
 
@@ -28,11 +23,13 @@ SCRIPT_NAME = "statusline.sh"
 FEED_REFRESH_SECONDS = 3600
 MAX_NEW_ITEMS_PER_FEED = 3
 HOOK_COMMANDS = {"sync", "advance", "restore", "refresh-feeds"}
+PATH_COMMANDS = {"add", "load", "libby", "clippings", "readwise"}
 
 
 # ------------------------------------------------------------------ small helpers
 
 def _slug(prefix, value):
+    import hashlib
     digest = hashlib.sha1(str(value).encode("utf-8")).hexdigest()[:8]
     return "%s-%s" % (prefix, digest)
 
@@ -45,6 +42,7 @@ def plugin_root():
 
 def version():
     """Read the version from plugin.json -- the manifest is the single source of truth."""
+    import json
     manifest = os.path.join(plugin_root(), ".claude-plugin", "plugin.json")
     try:
         with open(manifest, encoding="utf-8") as fh:
@@ -90,55 +88,62 @@ def advance_by(steps):
 
 # ----------------------------------------------------------------------- importing
 
-def _install(item_id, meta, text, announce=True):
+def _prepare_item(item_id, meta, text):
+    import chunker
     fragments = chunker.to_fragments(text)
     if not fragments:
         raise LookupError("nothing readable found in %r" % meta.get("title"))
+    return item_id, meta, fragments
 
+
+def _install_prepared(prepared):
+    """Save any number of already-chunked items with one lock and one stream publish."""
+    if not prepared:
+        return []
     with tbstate.locked():
         logical = tbstate.capture_position()
-        old_items = tbstate.load_queue()["items"]
-        tbstate.save_item(item_id, meta, fragments)
         queue = tbstate.load_queue()
-        if item_id not in queue["items"]:
-            queue["items"].append(item_id)
+        old_items = list(queue["items"])
+        queue_changed = False
+        for item_id, meta, fragments in prepared:
+            tbstate.save_item(item_id, meta, fragments)
+            if item_id not in queue["items"]:
+                queue["items"].append(item_id)
+                queue_changed = True
+        if queue_changed:
             tbstate.save_queue(queue)
         tbstate.rebuild_stream()
         tbstate.restore_position(logical, old_items=old_items)
+    return [item_id for item_id, _meta, _fragments in prepared]
+
+
+def _install(item_id, meta, text, announce=True):
+    prepared = _prepare_item(item_id, meta, text)
+    _install_prepared([prepared])
 
     if announce:
         label = meta.get("title") or item_id
         author = meta.get("author")
-        print("Queued %s%s -- %d fragments." % (label, (" by %s" % author) if author else "", len(fragments)))
-    return item_id, len(fragments)
+        print("Queued %s%s -- %d fragments." % (
+            label, (" by %s" % author) if author else "", len(prepared[2])))
+    return item_id, len(prepared[2])
 
 
 def _install_many(kind, items):
     """Install a multi-book export with one lock, rebuild, and summary."""
     prepared = []
     for meta, text in items:
-        fragments = chunker.to_fragments(text)
-        if not fragments:
-            continue
         identity = "%s\0%s" % (
             (meta.get("title") or "").strip().casefold(),
             (meta.get("author") or "").strip().casefold(),
         )
-        prepared.append((_slug(kind, identity), meta, fragments))
+        try:
+            prepared.append(_prepare_item(_slug(kind, identity), meta, text))
+        except LookupError:
+            continue
     if not prepared:
         raise LookupError("nothing readable found in the export")
-
-    with tbstate.locked():
-        logical = tbstate.capture_position()
-        queue = tbstate.load_queue()
-        old_items = list(queue["items"])
-        for item_id, meta, fragments in prepared:
-            tbstate.save_item(item_id, meta, fragments)
-            if item_id not in queue["items"]:
-                queue["items"].append(item_id)
-        tbstate.save_queue(queue)
-        tbstate.rebuild_stream()
-        tbstate.restore_position(logical, old_items=old_items)
+    _install_prepared(prepared)
 
     total = sum(len(row[2]) for row in prepared)
     print("Queued %d highlight book(s) -- %d fragments." % (len(prepared), total))
@@ -223,6 +228,61 @@ def cmd_read(args):
     after_interactive_import()
 
 
+def _json_export_kind(path):
+    """Distinguish the two supported JSON exports without accepting arbitrary JSON."""
+    import json
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if isinstance(payload, list):
+        return "readwise"
+    if not isinstance(payload, dict):
+        return None
+    if any(isinstance(payload.get(key), list) for key in ("books", "results", "data")):
+        return "readwise"
+    highlights = payload.get("highlights")
+    if isinstance(highlights, list):
+        if any(key in payload for key in ("title", "bookTitle", "name", "readingJourney")):
+            return "libby"
+        if any(isinstance(row, dict) and any(
+                key in row for key in ("bookTitle", "Book Title", "author", "Author"))
+                for row in highlights):
+            return "readwise"
+        return "libby"
+    return "libby" if "readingJourney" in payload else None
+
+
+def cmd_add(args):
+    """One front door: URL, supported local file/export, or Gutenberg search."""
+    if not args:
+        raise SystemExit("usage: /book add <title|url|file>")
+    target = " ".join(args).strip()
+    if re.match(r"^https?://", target, re.I):
+        return cmd_read([target])
+
+    path = os.path.abspath(os.path.expanduser(target))
+    suffix = os.path.splitext(path)[1].lower()
+    path_shaped = (target.startswith(("/", "./", "../", "~")) or suffix in {
+        ".epub", ".txt", ".csv", ".json", ".mobi", ".azw", ".azw3", ".kfx",
+    })
+    if os.path.exists(path):
+        if suffix == ".csv":
+            return cmd_readwise([path])
+        if suffix == ".json":
+            kind = _json_export_kind(path)
+            if kind == "readwise":
+                return cmd_readwise([path])
+            if kind == "libby":
+                return cmd_libby([path])
+            raise SystemExit("unrecognized JSON export: %s" % path)
+        return cmd_load([path])
+    if path_shaped:
+        raise SystemExit("no such file: %s" % path)
+    return cmd_gutenberg([target])
+
+
 # --------------------------------------------------------------------------- feeds
 
 def _feeds_file():
@@ -296,7 +356,9 @@ def refresh_feeds(force=False):
     import feed as feedmod
 
     now = time.time()
-    added = 0
+    staged = []
+    staged_links = set()
+    staged_seen = []
     for entry in data["feeds"]:
         if not force and now - float(entry.get("last_checked") or 0) < FEED_REFRESH_SECONDS:
             continue
@@ -312,6 +374,9 @@ def refresh_feeds(force=False):
         seen_set = set(seen)
         fresh = [item for item in items if item["link"] not in seen_set][:MAX_NEW_ITEMS_PER_FEED]
         for item in fresh:
+            if item["link"] in staged_links:
+                staged_seen.append((entry, item["link"]))
+                continue
             try:
                 article_meta, text = article.load(item["link"])
             except Exception:
@@ -319,12 +384,26 @@ def refresh_feeds(force=False):
                 continue
             article_meta["title"] = item.get("title") or article_meta.get("title")
             try:
-                _install(_slug("article", item["link"]), article_meta, text, announce=False)
-                added += 1
+                prepared = _prepare_item(_slug("article", item["link"]), article_meta, text)
             except Exception:
                 continue
-            seen.append(item["link"])
+            staged.append(prepared)
+            staged_links.add(item["link"])
+            staged_seen.append((entry, item["link"]))
         entry["seen"] = seen[-500:]
+    added = 0
+    if staged:
+        try:
+            _install_prepared(staged)
+        except Exception:
+            staged = []
+        else:
+            added = len(staged)
+            for entry, link in staged_seen:
+                seen = list(dict.fromkeys(entry.get("seen") or []))
+                if link not in seen:
+                    seen.append(link)
+                entry["seen"] = seen[-500:]
     # Network work happened without a lock. Merge its results into the latest subscription
     # set so a concurrent add survives and a concurrently removed feed stays removed.
     updates = {entry.get("url"): entry for entry in data["feeds"] if entry.get("url")}
@@ -453,19 +532,22 @@ def cmd_pane(args):
         enable_statusline(auto=False)
         print("Status line reading surface enabled.")
     elif action == "off":
-        holder = {"wrapped": None}
-        def mutate(config):
-            config["surfaces"]["statusline"] = False
-            wrapped = config.get("wrapped_statusline")
-            holder["wrapped"] = None if is_our_statusline(wrapped) else wrapped
-            config["wrapped_statusline"] = None
-        tbstate.update_config(mutate)
-        wrapped = holder["wrapped"]
-        _write_wrapped(None)
-        tbsettings.restore_statusline(wrapped)
+        _disable_statusline()
         print("Status line reading surface disabled. The original or newer user status line is in place.")
     else:
         raise SystemExit("usage: /book pane on|off")
+
+
+def _disable_statusline():
+    holder = {"wrapped": None}
+    def mutate(config):
+        config["surfaces"]["statusline"] = False
+        wrapped = config.get("wrapped_statusline")
+        holder["wrapped"] = None if is_our_statusline(wrapped) else wrapped
+        config["wrapped_statusline"] = None
+    tbstate.update_config(mutate)
+    _write_wrapped(None)
+    tbsettings.restore_statusline(holder["wrapped"])
 
 
 def cmd_repair(_args):
@@ -534,10 +616,7 @@ def cmd_refresh(args):
     print(message)
 
 
-def cmd_hud(args):
-    if not args or args[0] not in ("on", "off"):
-        raise SystemExit("usage: /book hud on|off")
-    enabled = args[0] == "on"
+def _set_hud(enabled):
     if enabled and tbstate.stream_count():
         generation_dir = tbstate.stream_generation_dir()
         if not generation_dir or not os.path.isfile(os.path.join(generation_dir, "0.hud")):
@@ -546,7 +625,14 @@ def cmd_hud(args):
                 old_items = list(tbstate.load_queue()["items"])
                 tbstate.rebuild_stream(include_hud=True)
                 tbstate.restore_position(logical, old_items=old_items)
-    config = tbstate.update_config(lambda live: live.update({"hud": enabled}))
+    return tbstate.update_config(lambda live: live.update({"hud": enabled}))
+
+
+def cmd_hud(args):
+    if not args or args[0] not in ("on", "off"):
+        raise SystemExit("usage: /book hud on|off")
+    enabled = args[0] == "on"
+    config = _set_hud(enabled)
     if enabled:
         message = "Graphical reading HUD enabled. It will appear above the book line."
         if not config["surfaces"]["statusline"]:
@@ -554,6 +640,43 @@ def cmd_hud(args):
         print(message)
     else:
         print("Graphical reading HUD disabled. The compact book line remains.")
+
+
+def cmd_display(args):
+    choices = ("hud", "line", "spinner", "off")
+    if not args:
+        config = tbstate.load_config()
+        surfaces = config["surfaces"]
+        if not any(surfaces.values()):
+            choice = "off"
+        elif surfaces["statusline"]:
+            choice = "hud" if config.get("hud") else "line"
+        else:
+            choice = "spinner"
+        print("Display: %s" % choice)
+        return
+    choice = args[0].lower()
+    if choice not in choices:
+        raise SystemExit("usage: /book display hud|line|spinner|off")
+    if choice == "off":
+        return cmd_off([])
+    if choice == "spinner":
+        _set_hud(False)
+        _disable_statusline()
+        tbstate.update_config(lambda config: config.update({
+            "paused": False,
+            "surfaces": {"statusline": False, "spinner": True},
+        }))
+    else:
+        enable_statusline(auto=False)
+        _set_hud(choice == "hud")
+        tbstate.update_config(lambda config: config.update({
+            "paused": False,
+            "surfaces": {"statusline": True, "spinner": True},
+        }))
+    tbstate.write_last_advance()
+    sync_spinner(tbstate.load_config())
+    print("Display: %s." % choice)
 
 
 # -------------------------------------------------------------------------- reading
@@ -613,7 +736,7 @@ def _resolve_queue_item(query, rows=None):
     return matches[0]
 
 
-def cmd_dashboard(_args):
+def cmd_dashboard(args):
     """A compact control panel for a bare `/book`, without making the model improvise."""
     config = tbstate.load_config()
     entries = _queue_entries()
@@ -630,7 +753,7 @@ def cmd_dashboard(_args):
             print("Help: /book help · Guided setup: /thinking-book:setup")
             return
         print("\nNo book is queued.")
-        print("Start: /book gutenberg <title> · /book load <file.epub>")
+        print("Start: /book add <title|url|file>")
         print("Guided setup: /thinking-book:setup · Help: /book help")
         return
 
@@ -655,11 +778,14 @@ def cmd_dashboard(_args):
     if len(entries) > 1:
         print("Library: book %d of %d" % (active["number"], len(entries)))
     print("Current: %s" % (current_line() or "(blank)"))
+    import shlex
+    import shutil
     if shutil.which("tb"):
         controls = "Next: !tb n · Back: !tb b"
     else:
-        controls = ("Next: /thinking-book:n · Back: /thinking-book:b · "
-                    "Faster: /book install-cli")
+        tb_command = shlex.quote(os.path.join(plugin_root(), "bin", "tb"))
+        controls = ("Next: !%s n · Back: !%s b · Shorter: /book install-cli"
+                    % (tb_command, tb_command))
     if not (surfaces["statusline"] or surfaces["spinner"]):
         controls += " · Enable: /book on"
     elif config["paused"]:
@@ -667,59 +793,53 @@ def cmd_dashboard(_args):
     else:
         controls += " · Pause: /book pause"
     print("\n%s" % controls)
-    print("Switch: /book queue · Display: /book hud %s · Setup: /thinking-book:setup" %
-          ("off" if config.get("hud") else "on"))
+    print("Switch: /book queue · Display: /book display · Setup: /thinking-book:setup")
+    if "--details" in args:
+        print("Surfaces: statusline=%s spinner=%s hud=%s" % (
+            "on" if surfaces["statusline"] else "off",
+            "on" if surfaces["spinner"] else "off",
+            "on" if config["hud"] else "off",
+        ))
+        if len(entries) > 1:
+            print("Queue:")
+            for entry in entries:
+                marker = "->" if entry["active"] else "  "
+                print("  %d. %s %s" % (entry["number"], marker, entry["title"]))
     print("All commands: /book help")
+
+
+def _turn(steps):
+    if not tbstate.stream_count():
+        print("Nothing queued -- try /book add <title|url|file>.")
+        return
+    before = tbstate.read_pos()
+    previous = tbstate.item_at(before)
+    position = advance_by(steps)
+    sync_spinner()
+    line = current_line()
+    current = tbstate.item_at(position)
+    if steps and position == before:
+        title = _display_title(current[1], current[3]) if current else "the library"
+        print("%s of %s. Use /book queue to switch books." %
+              ("End" if steps > 0 else "Beginning", title))
+    elif previous and current and previous[1] != current[1]:
+        print("📖 %s\n%s" % (_display_title(current[1], current[3]), line))
+    else:
+        print(line or "Nothing queued -- try /book add <title|url|file>.")
 
 
 def cmd_next(args):
     steps = int(args[0]) if args and args[0].lstrip("-").isdigit() else 1
-    advance_by(steps)
-    sync_spinner()
-    line = current_line()
-    print(line if line else "Nothing queued -- try /book gutenberg <title>.")
+    _turn(steps)
 
 
 def cmd_back(args):
     steps = int(args[0]) if args and args[0].lstrip("-").isdigit() else 1
-    advance_by(-abs(steps))
-    sync_spinner()
-    print(current_line() or "Nothing queued.")
+    _turn(-abs(steps))
 
 
 def cmd_status(_args):
-    config = tbstate.load_config()
-    total = tbstate.stream_count()
-    position = tbstate.read_pos()
-    if not total:
-        print("Nothing queued. Start with /book gutenberg <title> or /book load <file.epub>.")
-        return
-
-    rows = tbstate.load_index()
-    entries = _queue_entries(rows)
-    active = next((entry for entry in entries if entry["active"]), None)
-    offset = active["offset"] if active else position
-    length = active["length"] if active else total
-    percent = (offset / length) * 100
-    print("Reading:  %s" % (active["title"] if active else "(unknown)"))
-    meta = tbstate.item_meta(active["id"]) if active else {}
-    if meta.get("author"):
-        print("Author:   %s" % meta["author"])
-    print("Position: line %d of %d  (%.1f%%)" % (offset, length, percent))
-    if len(rows) > 1 and active:
-        print("Library:  book %d of %d" % (active["number"], len(rows)))
-    print("Mode:     %s%s (dwell %ss)" % (config["mode"], " [paused]" if config["paused"] else "", config["dwell_seconds"]))
-    print("Surfaces: statusline=%s spinner=%s" % (
-        "on" if config["surfaces"]["statusline"] else "off",
-        "on" if config["surfaces"]["spinner"] else "off",
-    ))
-    print("Current:  %s" % (current_line() or "(blank)"))
-
-    if len(rows) > 1:
-        print("\nQueue:")
-        for entry in entries:
-            marker = "->" if entry["active"] else "  "
-            print("  %d. %s %s" % (entry["number"], marker, entry["title"]))
+    cmd_dashboard(["--details"])
 
 
 def cmd_queue(args):
@@ -922,9 +1042,9 @@ def cmd_version(_args):
 
 
 def print_help():
-    print("Read something now: /book gutenberg <title> or /book load <file.epub>")
+    print("Read something now: /book add <title|url|file>")
     print("Then: /book status · /book queue · /book open <number-or-title> · /book pause")
-    print("Display: /book hud on|off · guided setup: /thinking-book:setup")
+    print("Display: /book display hud|line|spinner|off · guided setup: /thinking-book:setup")
     print("Library: /book queue rm <number-or-title> · /book queue clear")
     print("Sources: read <url> · clippings <file> · readwise <export> · libby <export> · feed")
     print("All commands: %s" % ", ".join(sorted(COMMANDS)))
@@ -991,7 +1111,7 @@ def cmd_sync(args):
             _spawn_feed_refresh()
         except Exception:
             pass
-    _report(args, current_line() or "Nothing queued -- try /book gutenberg <title>.")
+    _report(args, current_line() or "Nothing queued -- try /book add <title|url|file>.")
 
 
 def cmd_advance(args):
@@ -1029,12 +1149,12 @@ def cmd_restore(args):
 
 
 COMMANDS = {
-    "load": cmd_load, "gutenberg": cmd_gutenberg, "libby": cmd_libby,
+    "add": cmd_add, "load": cmd_load, "gutenberg": cmd_gutenberg, "libby": cmd_libby,
     "clippings": cmd_clippings, "readwise": cmd_readwise, "read": cmd_read,
     "feed": cmd_feed, "queue": cmd_queue, "open": cmd_open, "status": cmd_status, "mode": cmd_mode,
     "dwell": cmd_dwell, "pause": cmd_pause, "resume": cmd_resume, "pane": cmd_pane,
     "on": cmd_on, "off": cmd_off, "next": cmd_next, "back": cmd_back, "line": cmd_line,
-    "repair": cmd_repair, "refresh": cmd_refresh, "hud": cmd_hud,
+    "repair": cmd_repair, "refresh": cmd_refresh, "hud": cmd_hud, "display": cmd_display,
     "version": cmd_version, "help": cmd_help,
     "reader": cmd_reader, "install-cli": cmd_install_cli,
     "sync": cmd_sync, "advance": cmd_advance, "restore": cmd_restore,
@@ -1052,11 +1172,11 @@ def _normalise_argv(argv):
     The quoting matters: an unquoted $ARGUMENTS let a pasted newline reach the shell,
     which then tried to execute the next line as a program.
     """
-    path_commands = {"load", "libby", "clippings", "readwise"}
+    import shlex
     if len(argv) == 1 and any(ch.isspace() for ch in argv[0]):
         blob = argv[0].strip()
         name, separator, remainder = blob.partition(" ")
-        if separator and name in path_commands:
+        if separator and name in PATH_COMMANDS:
             lines = remainder.splitlines()
             raw_path = lines[0].strip()
             try:
@@ -1080,13 +1200,12 @@ def _looks_like_a_slash_command(argument):
 
 def main(argv):
     argv = _normalise_argv(argv)
-    path_commands = {"load", "libby", "clippings", "readwise"}
-    checked = argv[2:] if argv and argv[0] in path_commands else argv[1:]
+    checked = argv[2:] if argv and argv[0] in PATH_COMMANDS else argv[1:]
     stray = [a for a in checked if _looks_like_a_slash_command(a)]
     if stray:
         print("ignoring what looks like a second slash command (%s) -- send one command "
               "per message." % stray[0], file=sys.stderr)
-        keep = 2 if argv[0] in path_commands else 1
+        keep = 2 if argv[0] in PATH_COMMANDS else 1
         argv = argv[:keep] + [a for a in argv[keep:] if not _looks_like_a_slash_command(a)]
 
     if not argv:

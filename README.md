@@ -23,10 +23,12 @@ For guided setup inside Claude Code, use the native picker:
 /thinking-book:setup
 ```
 
-Or pick something directly:
+Or start directly. The plugin detects Gutenberg searches, URLs, EPUB/text files, Kindle
+clippings, Readwise exports, and Libby exports:
 
 ```
-/book gutenberg moby dick
+/book add moby dick
+/book add ~/Books/my-book.epub
 ```
 
 The first import enables an empty status-line slot automatically. If you already have a
@@ -44,23 +46,22 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 | `/thinking-book:b` | Back one line |
 | `/thinking-book:setup` | Guided source, pace, mode, and display picker |
 | `/book` | Compact reading dashboard and controls |
-| `/book status` | Title, author, progress in this book, current line |
+| `/book status` | Dashboard plus display details and the whole queue |
 | `/book queue` | A numbered library with each book's bookmark |
 | `/book open <number-or-title>` | Switch books; each one keeps its own bookmark |
 | `/book queue rm <number-or-title>` | Remove a book and continue at the next one |
 | `/book mode timer\|turn\|manual` | How pages turn (below) |
 | `/book dwell <seconds>` | Reading pace for timer mode (default 8) |
 | `/book pause` / `/book resume` | Freeze on a line, or carry on |
-| `/book on` / `/book off` | Enable both reading surfaces, or restore the originals |
-| `/book pane on\|off` | Attach or detach the status line surface |
-| `/book hud on\|off` | Add or remove the graphical progress row |
+| `/book display hud\|line\|spinner\|off` | Choose where and how the book appears |
+| `/book on` / `/book off` | Enable reading, or restore every setting it touched |
 | `/book repair` | Undo a self-wrapped status line (see below) |
 | `/book version` | Which version is running, and from which directory |
 | `/book refresh <secs\|off>` | Set `statusLine.refreshInterval` where your version supports it |
 
 ### Graphical reading HUD
 
-`/book hud on` adds a precomputed progress row above the prose:
+`/book display hud` adds a precomputed progress row above the prose:
 
 ```
 📖 Moby-Dick · ████░░░░░░ 124/310 (40%) · timer 8s
@@ -70,10 +71,13 @@ Call me Ishmael.
 It is optional and off by default. Normal mode retains the original one-line display and
 one bounded lookup, and does not generate HUD shards. Enabling the HUD builds matching
 256-line metadata shards once; each display then performs one additional bounded lookup. It
-never starts Python or scans the book. Turn it off at any time with `/book hud off`.
+never starts Python or scans the book. Switch back with `/book display line`, use only the
+live spinner with `/book display spinner`, or restore the original setup with
+`/book display off`.
 
-The HUD is display-only. Claude Code does not expose plugin buttons or arbitrary-command
-keybindings, so the in-app, no-model-turn controls remain `!tb n` and `!tb b`.
+The HUD is display-only. The `/book` dashboard prints working in-app page controls. When
+`tb` is installed they are `!tb n` and `!tb b`; otherwise it prints the plugin's absolute
+command, so page turning works immediately even when the install path contains spaces.
 
 ## Turning pages without spending a turn
 
@@ -145,14 +149,8 @@ Adjust the path to wherever the plugin is installed.
 
 | Command | Source | Gives you |
 |---|---|---|
-| `/book load <file.epub>` | A DRM-free EPUB you own | Full sequential prose |
-| `/book load <file.txt>` | Any plain text file | Full sequential prose |
-| `/book gutenberg <title\|id>` | [Project Gutenberg](https://gutendex.com) | Full sequential prose |
-| `/book read <url>` | A web article | Full sequential prose |
+| `/book add <title\|url\|file>` | Auto-detected source | Books, articles, or exported highlights |
 | `/book feed add <url>` | An RSS or Atom feed | New articles, queued automatically |
-| `/book libby <export.json>` | A Libby *Reading Journey* export | Your highlights |
-| `/book clippings <My Clippings.txt>` | Your Kindle's local clippings export | Highlights and notes, grouped by book |
-| `/book readwise <export.csv\|export.json>` | A Readwise data export | Highlights, grouped by book |
 
 Items form a queue and are read in order; when one runs out the next begins. Feeds top the
 queue up at session start, in the background, at most three new articles per feed per hour.
@@ -168,7 +166,7 @@ plugin, and it does not try.
 - **Libby/OverDrive has no public API**, but it does let you
   [export a title's Reading Journey](https://help.libbyapp.com/en-us/6151.htm) — highlights,
   notes, chapter and position — as JSON, and that export keeps working after you return
-  the book. `/book libby` reads that file.
+  the book. `/book add` reads that file.
 
 **This plugin does not strip DRM** — not Kindle KFX, not Adobe DRM, not Apple Books. An
 encrypted EPUB is rejected with an explanation rather than worked around. For sequential

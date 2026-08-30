@@ -217,7 +217,7 @@ class HookTest(IsolatedStateCase):
             source = fh.read()
         self.assertIn("allowed-tools: AskUserQuestion, Bash(python3:*)", source)
         self.assertIn("thinking_book.py", source)
-        self.assertIn("version output above", source)
+        self.assertIn("version output contains", source)
         self.assertIn("spinner only", source)
         self.assertNotIn("settings.json", source)
 
@@ -225,6 +225,14 @@ class HookTest(IsolatedStateCase):
         result = self.run_cli("help")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Read something now", result.stdout)
+
+    def test_setup_uses_unified_add_and_display_commands(self):
+        path = os.path.join(support.REPO, "commands", "setup.md")
+        with open(path) as fh:
+            source = fh.read()
+        self.assertIn("`add", source)
+        self.assertIn("`display", source)
+        self.assertNotIn("`pane on", source)
 
     def test_manual_hook_does_not_rewrite_an_unchanged_spinner(self):
         self.seed_stream(["one"], mode="manual")

@@ -102,7 +102,8 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(status.returncode, 0, status.stderr)
         self.assertIn("The Test Voyage", status.stdout)
         self.assertIn("A. Fixture", status.stdout)
-        self.assertIn("Position: line 1 of", status.stdout)
+        self.assertIn("1/", status.stdout)
+        self.assertIn("Surfaces:", status.stdout)
 
     def test_bare_dashboard_shows_current_book_progress_and_controls(self):
         self.run_cli("load", self.book)
@@ -110,9 +111,71 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(dashboard.returncode, 0, dashboard.stderr)
         self.assertIn("📖 The Test Voyage", dashboard.stdout)
         self.assertIn("1/", dashboard.stdout)
-        self.assertIn("/thinking-book:n", dashboard.stdout)
+        self.assertIn("Next: !", dashboard.stdout)
         self.assertIn("install-cli", dashboard.stdout)
+        self.assertIn(os.path.join(support.REPO, "bin", "tb"), dashboard.stdout)
         self.assertIn("/thinking-book:setup", dashboard.stdout)
+
+    def test_add_accepts_an_unquoted_file_path_with_spaces(self):
+        directory = os.path.join(self.config_dir, "My Books")
+        os.makedirs(directory)
+        path = os.path.join(directory, "short story.txt")
+        with open(path, "w") as fh:
+            fh.write("A readable sentence from the unified add command.")
+        result = self.run_cli("add " + path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("short story", result.stdout)
+
+    def test_add_auto_detects_readwise_csv_and_libby_json(self):
+        csv_path = os.path.join(self.config_dir, "readwise.csv")
+        with open(csv_path, "w") as fh:
+            fh.write("Book Title,Author,Highlight\nOne,A,First highlight.\n")
+        csv_result = self.run_cli("add", csv_path)
+        self.assertEqual(csv_result.returncode, 0, csv_result.stderr)
+        self.assertIn("highlight book", csv_result.stdout)
+
+        json_path = os.path.join(self.config_dir, "journey.json")
+        with open(json_path, "w") as fh:
+            json.dump({"title": "Library Book", "highlights": [{"text": "Quote."}]}, fh)
+        json_result = self.run_cli("add", json_path)
+        self.assertEqual(json_result.returncode, 0, json_result.stderr)
+        self.assertIn("Library Book", json_result.stdout)
+
+    def test_display_modes_are_single_commands_and_off_restores_settings(self):
+        original = {"type": "command", "command": "my-status"}
+        with open(self.tbstate.settings_path(), "w") as fh:
+            json.dump({"statusLine": original, "theme": "dark"}, fh)
+        self.run_cli("load", self.book)
+
+        hud = self.run_cli("display", "hud")
+        self.assertEqual(hud.returncode, 0, hud.stderr)
+        self.assertTrue(self.tbstate.load_config()["hud"])
+        spinner = self.run_cli("display", "spinner")
+        self.assertEqual(spinner.returncode, 0, spinner.stderr)
+        self.assertEqual(self.tbstate.load_config()["surfaces"],
+                         {"statusline": False, "spinner": True})
+        self.assertEqual(self.settings()["statusLine"], original)
+
+        self.run_cli("display", "off")
+        self.assertEqual(self.settings()["statusLine"], original)
+        self.assertEqual(self.settings()["theme"], "dark")
+
+    def test_manual_turn_reports_book_changes_and_stream_boundaries(self):
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1"])
+        self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        self.tbstate.write_pos(1)
+
+        crossed = self.run_cli("next")
+        self.assertIn("📖 Beta", crossed.stdout)
+        self.assertIn("b1", crossed.stdout)
+        end = self.run_cli("next")
+        self.assertIn("End of Beta", end.stdout)
+        self.assertEqual(self.tbstate.read_pos(), 2)
+        self.tbstate.write_pos(1)
+        beginning = self.run_cli("back")
+        self.assertIn("Beginning of Alpha", beginning.stdout)
 
     def test_dashboard_off_state_points_to_on_instead_of_pause(self):
         self.run_cli("load", self.book)
@@ -163,9 +226,9 @@ class RoundTripTest(IsolatedStateCase):
 
         status = self.run_cli("status")
         self.assertEqual(status.returncode, 0, status.stderr)
-        self.assertIn("Reading:  Beta", status.stdout)
-        self.assertIn("Position: line 2 of 3  (66.7%)", status.stdout)
-        self.assertIn("Library:  book 2 of 2", status.stdout)
+        self.assertIn("📖 Beta", status.stdout)
+        self.assertIn("2/3 (66%)", status.stdout)
+        self.assertIn("Library: book 2 of 2", status.stdout)
         self.assertNotIn("line 4 of 5", status.stdout)
 
     def test_pane_on_wraps_an_existing_status_line_and_off_restores_it(self):

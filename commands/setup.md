@@ -26,24 +26,17 @@ Then use AskUserQuestion to collect no more than four decisions:
 3. Display: graphical HUD plus spinner, compact book line plus spinner, or spinner only.
 4. If timer mode was chosen, pace: 5, 8, 12, or 20 seconds.
 
-Summarize the choices before applying them. The version output above contains a `running
-from` absolute path. Append `/scripts/thinking_book.py` to that exact path and run every
-applying command as `python3 "<absolute script path>" <subcommand>`. Use only that CLI;
-never edit Claude configuration files directly:
+The version output contains a `running from` absolute path. Append
+`/scripts/thinking_book.py` and run only that CLI; never edit Claude configuration files.
+Summarize the choices, then apply at most these three commands:
 
-- Import with the appropriate `gutenberg`, `load`, `read`, `clippings`, `readwise`, or
-  `libby` subcommand.
-- Apply the chosen display in this exact order:
-  - graphical HUD plus spinner: `on`, then `hud on`;
-  - compact book line plus spinner: `on`, then `hud off`;
-  - spinner only: `on`, then `hud off`, then `pane off`.
-- Apply `mode` and, for timer mode, `dwell` after the display commands.
-- Quote every user-supplied query, URL, and path as one shell argument.
-- If an import or configuration command fails, show its exact useful error and stop. Do
-  not claim setup succeeded and do not retry a network request without asking.
+1. `add "<title, URL, or path>"` unless keeping the current book.
+2. `display hud|line|spinner`.
+3. `mode timer|turn|manual`, followed by `dwell <seconds>` only for timer mode.
+
+Quote user input as one argument. On failure, show the exact useful error and stop; never
+claim success or retry a network request without asking.
 
 Finish with the current dashboard by running the same absolute CLI path with one empty
-quoted argument. Repeat the working page-turn controls from that dashboard: mention `!tb n`
-and `!tb b` only when it shows them, otherwise mention `/thinking-book:n` and the offered
-`install-cli` shortcut. Keep the final response brief and do not add limitations the user
-did not encounter.
+quoted argument. Repeat its page-turn controls exactly. Keep the final response brief and
+do not add limitations the user did not encounter.
