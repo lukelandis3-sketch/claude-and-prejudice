@@ -106,6 +106,70 @@ class FeedSeenTest(IsolatedStateCase):
         seen = self.tb.load_feeds()["feeds"][0]["seen"]
         self.assertNotIn(self.entries[0]["link"], seen)
 
+    def test_transient_article_failure_is_retried_on_the_next_refresh(self):
+        self.entries = [self.entries[0]]
+        self._write_feed([])
+        article = sys.modules["article"]
+        succeeds = article.load
+        calls = {"count": 0}
+
+        def flaky(url):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise OSError("temporary timeout")
+            return succeeds(url)
+
+        article.load = flaky
+
+        self.assertEqual(self.tb.refresh_feeds(force=True), 0)
+        self.assertNotIn(
+            self.entries[0]["link"], self.tb.load_feeds()["feeds"][0]["seen"])
+        self.assertEqual(self.tb.refresh_feeds(force=True), 1)
+        self.assertIn(
+            self.entries[0]["link"], self.tb.load_feeds()["feeds"][0]["seen"])
+
+    def test_one_failed_article_does_not_consume_the_success_budget(self):
+        self.entries = [
+            {"title": "e%d" % n, "link": "https://x.test/%d" % n}
+            for n in range(4)
+        ]
+        self._write_feed([])
+        article = sys.modules["article"]
+        succeeds = article.load
+
+        def first_is_broken(url):
+            if url == self.entries[0]["link"]:
+                raise OSError("permanently unavailable")
+            return succeeds(url)
+
+        article.load = first_is_broken
+
+        self.assertEqual(self.tb.refresh_feeds(force=True), 3)
+        seen = self.tb.load_feeds()["feeds"][0]["seen"]
+        self.assertNotIn(self.entries[0]["link"], seen)
+        self.assertEqual(seen, [entry["link"] for entry in self.entries[1:]])
+
+    def test_retry_window_eventually_reaches_entries_after_many_failures(self):
+        self.entries = [
+            {"title": "e%d" % n, "link": "https://x.test/%d" % n}
+            for n in range(13)
+        ]
+        self._write_feed([])
+        article = sys.modules["article"]
+        succeeds = article.load
+
+        def first_twelve_are_broken(url):
+            if url != self.entries[12]["link"]:
+                raise OSError("unavailable")
+            return succeeds(url)
+
+        article.load = first_twelve_are_broken
+
+        self.assertEqual(self.tb.refresh_feeds(force=True), 0)
+        self.assertEqual(self.tb.refresh_feeds(force=True), 1)
+        self.assertIn(
+            self.entries[12]["link"], self.tb.load_feeds()["feeds"][0]["seen"])
+
     def test_valid_non_object_feeds_file_is_treated_as_empty(self):
         self.tb.tbstate.write_json(self.tb._feeds_file(), ["not", "an", "object"])
         self.assertEqual(self.tb.load_feeds(), {"feeds": []})

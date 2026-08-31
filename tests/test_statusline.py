@@ -5,8 +5,12 @@ for speed as well as behaviour -- and above all for never failing loudly.
 """
 
 import os
+import subprocess
+import threading
 import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 
 from support import STATUSLINE, IsolatedStateCase
 
@@ -158,6 +162,14 @@ class StatusLineTest(IsolatedStateCase):
         self.tbstate.save_config(config)
         self.assertEqual(self.run_statusline().stdout.strip(), "📖 book: one")
 
+    def test_missing_prefix_cache_falls_back_to_no_prefix(self):
+        self.seed_stream(["one"], mode="manual")
+        os.unlink(self.tbstate.path("status.prefix"))
+        result = self.run_statusline()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout.strip(), "📖 one")
+
     def test_long_passage_wraps_without_hiding_words(self):
         passage = (
             "Its extreme downtown is the battery, where that noble mole is washed by "
@@ -190,6 +202,213 @@ class StatusLineTest(IsolatedStateCase):
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(self.tbstate.read_pos(), 1)
+
+    def test_rebuild_waits_for_an_inflight_timer_commit(self):
+        """A stale shell must never publish its cursor into a replacement stream."""
+        self.seed_stream(["old-one", "old-two"], mode="timer", dwell=1)
+        self.tbstate.write_last_advance(time.time() - 10)
+        fake_bin = os.path.join(self.config_dir, "blocking-mv")
+        os.makedirs(fake_bin)
+        entered = os.path.join(self.config_dir, "timer-entered")
+        release = os.path.join(self.config_dir, "release-timer")
+        mv = os.path.join(fake_bin, "mv")
+        with open(mv, "w") as fh:
+            fh.write(
+                "#!/bin/sh\n"
+                "case \"${2:-}\" in\n"
+                "  */thinking-book/last)\n"
+                "    if [ ! -f \"$CLAUDE_CONFIG_DIR/timer-entered\" ]; then\n"
+                "      : > \"$CLAUDE_CONFIG_DIR/timer-entered\"\n"
+                "      while [ ! -f \"$CLAUDE_CONFIG_DIR/release-timer\" ]; do sleep .01; done\n"
+                "    fi\n"
+                "    ;;\n"
+                "esac\n"
+                "exec /bin/mv \"$@\"\n"
+            )
+        os.chmod(mv, 0o755)
+        environment = dict(os.environ)
+        environment["CLAUDE_CONFIG_DIR"] = self.config_dir
+        environment["PATH"] = fake_bin + os.pathsep + environment["PATH"]
+        process = subprocess.Popen(
+            ["sh", STATUSLINE], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=environment,
+        )
+        process.stdin.write("{}")
+        process.stdin.close()
+        process.stdin = None
+        deadline = time.time() + 5
+        while not os.path.exists(entered) and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(os.path.exists(entered), "timer did not reach its commit")
+
+        def replace_stream():
+            with self.tbstate.rebuilding_stream():
+                self.tbstate.save_item(
+                    "replacement", {"title": "Replacement", "kind": "book"}, ["new-only"])
+                self.tbstate.save_queue({"items": ["replacement"]})
+
+        worker = threading.Thread(target=replace_stream)
+        worker.start()
+        time.sleep(0.1)
+        with open(release, "w"):
+            pass
+        stdout, stderr = process.communicate(timeout=10)
+        worker.join(timeout=10)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(process.returncode, 0)
+        self.assertEqual(stderr, "")
+        self.assertLessEqual(self.tbstate.read_pos(), self.tbstate.stream_count())
+        self.assertEqual(self.tbstate.read_pos(), 1)
+        self.assertEqual(self.tbstate.stream_line(1), "new-only")
+
+    def test_timer_waits_until_a_published_generation_is_fully_restored(self):
+        self.seed_stream(["old-only"], mode="timer", dwell=1)
+        self.tbstate.write_last_advance(time.time() - 10)
+        restoring = threading.Event()
+        release = threading.Event()
+        original_restore = self.tbstate.restore_position
+
+        def blocked_restore(*args, **kwargs):
+            restoring.set()
+            release.wait(5)
+            return original_restore(*args, **kwargs)
+
+        def replace_stream():
+            with self.tbstate.rebuilding_stream():
+                self.tbstate.save_item(
+                    "replacement", {"title": "Replacement", "kind": "book"},
+                    ["new-one", "new-two"],
+                )
+                self.tbstate.save_queue({"items": ["replacement"]})
+
+        with mock.patch.object(self.tbstate, "restore_position", side_effect=blocked_restore):
+            worker = threading.Thread(target=replace_stream)
+            worker.start()
+            self.assertTrue(restoring.wait(5), "rebuild did not publish its new generation")
+            result = self.run_statusline()
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(result.stderr, "")
+            self.assertEqual(result.stdout.strip(), "📖 new-one")
+            self.assertEqual(self.tbstate.read_pos(), 1)
+            release.set()
+            worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(self.tbstate.read_pos(), 1)
+
+    def test_pause_linearizes_before_a_waiting_timer_commit(self):
+        self.seed_stream(["one", "two"], mode="timer", dwell=1)
+        self.tbstate.write_last_advance(time.time() - 10)
+        fake_bin = os.path.join(self.config_dir, "blocking-mkdir")
+        os.makedirs(fake_bin)
+        mkdir = os.path.join(fake_bin, "mkdir")
+        with open(mkdir, "w") as fh:
+            fh.write(
+                "#!/bin/sh\n"
+                "case \"${1:-}\" in\n"
+                "  */thinking-book/turn.lock.d)\n"
+                "    : > \"$CLAUDE_CONFIG_DIR/timer-waiting\"\n"
+                "    while [ ! -f \"$CLAUDE_CONFIG_DIR/release-timer\" ]; do sleep .01; done\n"
+                "    ;;\n"
+                "esac\n"
+                "exec /bin/mkdir \"$@\"\n"
+            )
+        os.chmod(mkdir, 0o755)
+        environment = dict(os.environ)
+        environment["CLAUDE_CONFIG_DIR"] = self.config_dir
+        environment["PATH"] = fake_bin + os.pathsep + environment["PATH"]
+        process = subprocess.Popen(
+            ["sh", STATUSLINE], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env=environment,
+        )
+        process.stdin.write("{}")
+        process.stdin.close()
+        process.stdin = None
+        waiting = os.path.join(self.config_dir, "timer-waiting")
+        deadline = time.time() + 5
+        while not os.path.exists(waiting) and time.time() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(os.path.exists(waiting), "timer did not wait at its commit lock")
+
+        paused = self.run_cli("pause")
+        with open(os.path.join(self.config_dir, "release-timer"), "w"):
+            pass
+        stdout, stderr = process.communicate(timeout=10)
+
+        self.assertEqual(paused.returncode, 0, paused.stderr)
+        self.assertEqual(process.returncode, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(stdout.strip(), "📖 one")
+        self.assertEqual(self.tbstate.read_pos(), 1)
+        self.assertTrue(self.tbstate.load_config()["paused"])
+
+    def test_malformed_system_clock_output_is_silent_and_does_not_advance(self):
+        self.seed_stream(["one", "two"], mode="timer", dwell=1)
+        self.tbstate.write_last_advance(time.time() - 10)
+        fake_bin = os.path.join(self.config_dir, "bad-clock")
+        os.makedirs(fake_bin)
+        date = os.path.join(fake_bin, "date")
+        with open(date, "w") as fh:
+            fh.write("#!/bin/sh\nprintf 'not-a-timestamp\\n'\n")
+        os.chmod(date, 0o755)
+
+        result = self.run_statusline(
+            env={"PATH": fake_bin + os.pathsep + os.environ["PATH"]})
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout.strip(), "📖 one")
+        self.assertEqual(self.tbstate.read_pos(), 1)
+
+    def test_zero_padded_system_clock_output_is_not_shell_octal(self):
+        self.seed_stream(["one", "two"], mode="timer", dwell=1)
+        self.tbstate.write_last_advance(time.time() - 10)
+        fake_bin = os.path.join(self.config_dir, "octal-clock")
+        os.makedirs(fake_bin)
+        date = os.path.join(fake_bin, "date")
+        with open(date, "w") as fh:
+            fh.write("#!/bin/sh\nprintf '08\\n'\n")
+        os.chmod(date, 0o755)
+
+        result = self.run_statusline(
+            env={"PATH": fake_bin + os.pathsep + os.environ["PATH"]})
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.tbstate.read_pos(), 1)
+
+    def test_zero_padded_columns_are_rejected_before_width_arithmetic(self):
+        self.seed_stream(["a passage long enough to need safe width handling"], mode="manual")
+        result = self.run_statusline(env={"COLUMNS": "09"})
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+
+    def test_malformed_progress_tokens_are_silent_and_inert(self):
+        self.seed_stream(["one", "two"], mode="timer", dwell=1, wpm=None)
+        self.tbstate.write_last_advance(time.time() - 10)
+        generation = self.tbstate.stream_generation()
+        self.tbstate.atomic_write(
+            self.tbstate.path("statusline.progress"), "%s 1:2 1\n" % generation)
+
+        result = self.run_statusline()
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+
+    def test_concurrent_timer_renders_advance_at_most_one_page(self):
+        self.seed_stream(
+            ["line-%d" % number for number in range(20)],
+            mode="timer", dwell=1, wpm=None,
+        )
+        self.tbstate.write_last_advance(time.time() - 10)
+
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            results = list(pool.map(lambda _number: self.run_statusline(), range(20)))
+
+        self.assertTrue(all(result.returncode == 0 for result in results))
+        self.assertTrue(all(result.stderr == "" for result in results))
+        self.assertEqual(self.tbstate.read_pos(), 2)
 
     def test_optional_hud_adds_precomputed_book_progress_above_the_line(self):
         self.seed_stream(["one", "two"], mode="manual")
@@ -275,7 +494,7 @@ class StatusLineTest(IsolatedStateCase):
         self.assertIn('{"model":"opus"}', output)
 
     def test_wrapped_status_line_survives_our_state_being_absent(self):
-        for name in ("hot.env", "pos", "count", "stream.txt"):
+        for name in ("status.control", "status.prefix", "pos", "count", "stream.txt"):
             path = self.tbstate.path(name)
             if os.path.exists(path):
                 os.unlink(path)
@@ -331,29 +550,83 @@ class StatusLineTest(IsolatedStateCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stderr, "")
 
-    def test_corrupt_zero_padded_wpm_never_breaks_the_status_line(self):
-        self.seed_stream(["one", "two"], mode="timer", wpm=250)
-        hot = self.tbstate.path("hot.env")
-        with open(hot) as fh:
-            contents = fh.read()
-        self.tbstate.atomic_write(hot, contents.replace("TB_WPM='250'", "TB_WPM='00'"))
+    def test_legacy_hot_env_is_never_executed(self):
+        self.seed_stream(["one"], mode="manual")
+        marker = self.tbstate.path("hot-env-ran")
+        poison = (
+            'TB_PREFIX=$(printf pwned > "$CLAUDE_CONFIG_DIR/thinking-book/hot-env-ran")\n'
+            "unset TB_STATUSLINE\n"
+            "exit 42\n"
+            "TB_MODE='\n"
+        )
+        self.tbstate.atomic_write(self.tbstate.path("hot.env"), poison)
+
         result = self.run_statusline()
+
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stderr, "")
         self.assertEqual(result.stdout.strip(), "📖 one")
+        self.assertFalse(os.path.exists(marker))
+
+    def test_prefix_data_is_inert_even_when_the_cache_is_corrupt(self):
+        self.seed_stream(["one"], mode="manual")
+        marker = self.tbstate.path("prefix-ran")
+        prefix = '$(printf pwned > "$CLAUDE_CONFIG_DIR/thinking-book/prefix-ran"); exit 42; '
+        self.tbstate.atomic_write(self.tbstate.path("status.prefix"), prefix + "\nignored\n")
+
+        result = self.run_statusline()
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout.strip(), "📖 " + prefix + "one")
+        self.assertFalse(os.path.exists(marker))
+
+    def test_corrupt_zero_padded_wpm_is_silent_and_nonfatal(self):
+        self.seed_stream(["one", "two"], mode="timer", wpm=250)
+        control = self.tbstate.path("status.control")
+        with open(control) as fh:
+            contents = fh.read()
+        self.tbstate.atomic_write(control, contents.replace(" 250 ", " 00 "))
+        result = self.run_statusline()
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout, "")
 
     def test_huge_corrupt_wpm_preserves_a_wrapped_status_line(self):
         self.seed_stream(["one"], mode="timer", wpm=250)
         self._wrap("echo 'my own status line'")
-        hot = self.tbstate.path("hot.env")
-        with open(hot) as fh:
+        control = self.tbstate.path("status.control")
+        with open(control) as fh:
             contents = fh.read()
         self.tbstate.atomic_write(
-            hot, contents.replace("TB_WPM='250'", "TB_WPM='999999999999999999999'"))
+            control, contents.replace(" 250 ", " 999999999999999999999 "))
         result = self.run_statusline()
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stderr, "")
-        self.assertEqual(result.stdout.splitlines(), ["my own status line", "📖 one"])
+        self.assertEqual(result.stdout.splitlines(), ["my own status line"])
+
+    def test_malformed_control_records_fail_closed_without_noise(self):
+        self.seed_stream(["one"], mode="manual")
+        self._wrap("echo 'my own status line'")
+        malformed = (
+            "",
+            "unset TB_MODE\n",
+            "exit 42\n",
+            "TB_MODE='\n",
+            "1 manual 8 0 0 1\n",
+            "1 unknown 8 0 0 1 0\n",
+            "1 manual nope 0 0 1 0\n",
+            "1 manual 8 0 maybe 1 0\n",
+            "1 manual 8 0 0 1 0 extra\n",
+            "1 manual 8 0 0 1 0\nexit 42\n",
+        )
+        for raw in malformed:
+            with self.subTest(raw=raw):
+                self.tbstate.atomic_write(self.tbstate.path("status.control"), raw)
+                result = self.run_statusline()
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, "")
+                self.assertEqual(result.stdout.splitlines(), ["my own status line"])
 
     def test_huge_numeric_state_is_silent_and_nonfatal(self):
         self.seed_stream(["one"], mode="timer", wpm=None)
@@ -368,6 +641,25 @@ class StatusLineTest(IsolatedStateCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stderr, "")
 
+    def test_zero_padded_numeric_state_never_enters_shell_octal_arithmetic(self):
+        targets = (
+            self.tbstate.path("pos"),
+            self.tbstate.path("last"),
+            os.path.join(self.tbstate.stream_generation_dir(), "count"),
+        )
+        for target in targets:
+            with self.subTest(target=os.path.basename(target)):
+                self.seed_stream(
+                    ["line-%d" % number for number in range(10)],
+                    mode="timer", dwell=600, wpm=None,
+                )
+                if os.path.basename(target) == "count":
+                    target = os.path.join(self.tbstate.stream_generation_dir(), "count")
+                self.tbstate.atomic_write(target, "08\n")
+                result = self.run_statusline()
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, "")
+
     def test_huge_generation_name_is_silent_and_nonfatal(self):
         self.seed_stream(["one"], mode="manual")
         self.tbstate.atomic_write(self.tbstate.path("stream.gen"), "a" * 10000 + "\n")
@@ -378,14 +670,15 @@ class StatusLineTest(IsolatedStateCase):
 
     def test_corrupt_dwell_uses_a_safe_default(self):
         self.seed_stream(["one", "two"], mode="timer", wpm=None)
-        hot = self.tbstate.path("hot.env")
-        with open(hot) as fh:
+        control = self.tbstate.path("status.control")
+        with open(control) as fh:
             contents = fh.read()
         self.tbstate.atomic_write(
-            hot, contents.replace("TB_DWELL='8'", "TB_DWELL='999999999999999999999'"))
+            control, contents.replace(" 8 ", " 999999999999999999999 ", 1))
         result = self.run_statusline()
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout, "")
 
     def test_corrupt_zero_padded_shard_word_count_is_not_fatal(self):
         self.seed_stream(["one"], mode="timer", wpm=250)
@@ -403,6 +696,12 @@ class StatusLineTest(IsolatedStateCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout.strip(), "")
 
+    def test_no_config_root_environment_exits_zero_and_is_silent(self):
+        result = self.run_statusline(env={"CLAUDE_CONFIG_DIR": "", "HOME": ""})
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+
     def test_large_stdin_without_a_wrapper_is_drained_and_silent(self):
         self.seed_stream(["one"], statusline=False)
         result = self.run_statusline(stdin_json="x" * (1024 * 1024))
@@ -413,6 +712,7 @@ class StatusLineTest(IsolatedStateCase):
     def test_numeric_state_reads_do_not_spawn_cat_or_tr(self):
         with open(STATUSLINE) as fh:
             source = fh.read()
+        self.assertNotIn('. "$TB_DIR/hot.env"', source)
         self.assertNotIn('cat "$TB_DIR/pos"', source)
         self.assertNotIn("tr -d", source)
         self.assertNotIn("for _word in $LINE", source)

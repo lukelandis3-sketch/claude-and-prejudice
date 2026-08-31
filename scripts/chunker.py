@@ -28,8 +28,10 @@ _HEADING = re.compile(
 
 _PARAGRAPH_BREAK = re.compile(r'\n\s*\n+')
 
-_CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]')
-_ANSI = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
+_OSC = re.compile(r'\x1b\](?:[^\x07\x1b]|\x1b(?!\\))*(?:\x07|\x1b\\)')
+_ANSI = re.compile(r'(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]')
+_BIDI = re.compile(r'[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]')
+_CONTROL = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]')
 
 # Claude Code reserves some terminal columns around both reading surfaces. A compact
 # measure also makes each timed fragment readable at a glance instead of spanning the UI.
@@ -42,7 +44,9 @@ def clean_text(raw):
     if not raw:
         return ""
     text = unicodedata.normalize("NFC", raw)
+    text = _OSC.sub(" ", text)
     text = _ANSI.sub(" ", text)
+    text = _BIDI.sub("", text)
     text = _CONTROL.sub(" ", text)
     # Soft hyphen and zero-width characters read as garbage in a terminal.
     for junk in ("­", "​", "﻿"):

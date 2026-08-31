@@ -23,6 +23,7 @@ SCRIPT_NAME = "statusline.sh"
 FEED_REFRESH_SECONDS = 3600
 LIVE_MARKER_MAX_AGE = 30 * 24 * 60 * 60
 MAX_NEW_ITEMS_PER_FEED = 3
+MAX_FEED_FETCH_ATTEMPTS = MAX_NEW_ITEMS_PER_FEED * 4
 HOOK_COMMANDS = {"sync", "advance", "restore", "refresh-feeds"}
 PATH_COMMANDS = {"add", "start", "load", "libby", "clippings", "readwise"}
 
@@ -126,41 +127,48 @@ def current_line():
     return tbstate.stream_line(tbstate.read_pos())
 
 
-def sync_spinner(config=None):
-    """Point spinnerVerbs at the line we are currently on."""
-    config = config or tbstate.load_config()
-    cursor = tbstate.path("spinner.cursor")
-    try:
-        os.unlink(cursor)
-    except OSError:
-        pass
-    generation = tbstate.stream_generation() or "none"
-    position = tbstate.read_pos()
-    line = tbstate.stream_line(position)
-    if config["surfaces"]["spinner"]:
-        prefix = config.get("prefix") or ""
-        tbsettings.set_spinner_line((prefix + line) if line else "")
-        # Only certify the cheap Stop path if the immutable stream pointer and cursor
-        # stayed stable while settings.json was updated.
-        if ((tbstate.stream_generation() or "none") == generation
-                and tbstate.read_pos() == position):
-            tbstate.atomic_write(cursor, "%s %d %d\n" % (
-                generation, position, tbstate.stream_count()))
-    return line
+def sync_spinner():
+    """Point spinnerVerbs at the line we are currently on using live preferences."""
+    tbstate.consume_statusline_progress()
+    # Ignore caller snapshots: config.lock makes /book off and a concurrent hook linear.
+    with tbstate.locked("config.lock"):
+        config = tbstate.load_config()
+        cursor = tbstate.path("spinner.cursor")
+        try:
+            os.unlink(cursor)
+        except OSError:
+            pass
+        generation = tbstate.stream_generation() or "none"
+        position = tbstate.read_pos()
+        line = tbstate.stream_line(position)
+        if config["surfaces"]["spinner"]:
+            prefix = tbstate.terminal_prefix(config.get("prefix"))
+            tbsettings.set_spinner_line((prefix + line) if line else "")
+            # Only certify the cheap Stop path if the immutable stream pointer and cursor
+            # stayed stable while settings.json was updated.
+            if ((tbstate.stream_generation() or "none") == generation
+                    and tbstate.read_pos() == position):
+                tbstate.atomic_write(cursor, "%s %d %d\n" % (
+                    generation, position, tbstate.stream_count()))
+        return line
 
 
 def advance_by(steps):
     """Move the bookmark, clamped to the stream. Returns the new position."""
-    total = tbstate.stream_count()
-    before = tbstate.read_pos()
-    requested = before + steps
-    position = max(1, min(requested, total if total else 1))
-    if position != before or (steps < 0 and tbstate.is_finished()):
-        tbstate.write_pos(position)
-    if total and steps > 0 and requested > total:
-        tbstate.mark_finished()
-    tbstate.write_last_advance()
-    return position
+    with tbstate.turn_guard():
+        tbstate.consume_statusline_progress(guard=False)
+        total = tbstate.stream_count()
+        before = tbstate.read_pos()
+        requested = before + steps
+        position = max(1, min(requested, total if total else 1))
+        if position != before or (steps < 0 and tbstate.is_finished()):
+            tbstate.write_pos(position)
+        if position != before:
+            tbstate.remember_crossed_books(before, position)
+        if total and steps > 0 and requested > total:
+            tbstate.mark_finished()
+        tbstate.write_last_advance()
+        return position
 
 
 # ----------------------------------------------------------------------- importing
@@ -169,7 +177,8 @@ def _prepare_item(item_id, meta, text):
     import chunker
     fragments = chunker.to_fragments(text)
     if not fragments:
-        raise LookupError("nothing readable found in %r" % meta.get("title"))
+        raise LookupError("nothing readable found in %r" % tbstate.terminal_label(
+            meta.get("title"), fallback=item_id))
     return item_id, meta, fragments
 
 
@@ -195,8 +204,8 @@ def _install(item_id, meta, text, announce=True):
     _install_prepared([prepared])
 
     if announce:
-        label = meta.get("title") or item_id
-        author = meta.get("author")
+        label = tbstate.terminal_label(meta.get("title"), fallback=item_id)
+        author = tbstate.terminal_label(meta.get("author"))
         print("Queued %s%s -- %d fragments." % (
             label, (" by %s" % author) if author else "", len(prepared[2])))
     return item_id, len(prepared[2])
@@ -337,15 +346,35 @@ def _json_export_kind(path):
         return None
     if any(isinstance(payload.get(key), list) for key in ("books", "results", "data")):
         return "readwise"
+    if "readingJourney" in payload:
+        return "libby"
     highlights = payload.get("highlights")
+    if isinstance(highlights, dict):
+        # Libby may key annotations by opaque ids rather than returning a list.
+        return "libby"
     if isinstance(highlights, list):
+        # Readwise rows carry an explicit per-highlight book title. A generic `title`,
+        # however, is also how Libby labels a chapter, so top-level book metadata wins
+        # over that weaker row signal.
+        if any(isinstance(row, dict) and any(
+                key in row for key in ("bookTitle", "Book Title"))
+                for row in highlights):
+            return "readwise"
+        has_book_metadata = any(
+            isinstance(payload.get(key), str) and payload[key].strip()
+            for key in ("title", "bookTitle", "name", "author", "creator",
+                        "firstCreatorName")
+        ) or any(isinstance(payload.get(key), dict)
+                 for key in ("title", "bookTitle", "name"))
+        if has_book_metadata:
+            return "libby"
         if any(isinstance(row, dict) and any(
                 key in row for key in (
-                    "title", "Title", "bookTitle", "Book Title", "author", "Author"))
+                    "title", "Title", "author", "Author"))
                 for row in highlights):
             return "readwise"
         return "libby"
-    return "libby" if "readingJourney" in payload else None
+    return None
 
 
 def _run_import(handler, args, activate):
@@ -412,14 +441,15 @@ def cmd_start(args):
             offset = tbstate.load_bookmarks().get(written[0], 1)
             position = tbstate.resolve_position(written[0], offset)
             if position is not None:
-                tbstate.write_pos(position)
+                with tbstate.turn_guard():
+                    tbstate.write_pos(position)
     elif not tbstate.load_queue()["items"]:
         raise SystemExit("Choose a book: %s" % book_command("<title|url|file>"))
 
     current = tbstate.item_at(tbstate.read_pos())
     title = _display_title(current[1], current[3]) if current else "your book"
     meta = tbstate.item_meta(current[1]) if current else {}
-    author = meta.get("author") if isinstance(meta, dict) else None
+    author = tbstate.terminal_label(meta.get("author")) if isinstance(meta, dict) else None
     label = "%s by %s" % (title, author) if author else title
 
     statusline_reason = ""
@@ -432,14 +462,14 @@ def cmd_start(args):
                 "paused": False,
                 "hud": True,
                 "surfaces": {"statusline": enabled, "spinner": True},
-            }))
+            }), reset_timer=True)
             if enabled and not tbstate.ensure_hud_shards():
                 with tbstate.rebuilding_stream(include_hud=True):
                     pass
         else:
-            config = tbstate.update_config(lambda live: live.update({"paused": False}))
-        tbstate.write_last_advance()
-        sync_spinner(config)
+            config = tbstate.update_config(
+                lambda live: live.update({"paused": False}), reset_timer=True)
+        sync_spinner()
     except Exception as exc:
         message = ("Queued %s, but setup did not finish" if args
                    else "Could not resume %s") % label
@@ -514,7 +544,10 @@ def cmd_feed(args):
         if not data["feeds"]:
             print("No feeds subscribed.")
         for entry in data["feeds"]:
-            print("%s  %s" % (entry.get("title") or "(untitled)", entry["url"]))
+            print("%s  %s" % (
+                tbstate.terminal_label(entry.get("title"), fallback="(untitled)"),
+                tbstate.terminal_label(entry["url"]),
+            ))
         return
 
     if len(args) < 2:
@@ -534,7 +567,7 @@ def cmd_feed(args):
             })
             save_feeds(data)
         print("Subscribed to %s (%d entries available); fetching in the background."
-              % (meta.get("title") or url, len(entries)))
+              % (tbstate.terminal_label(meta.get("title"), fallback=url), len(entries)))
         # Never fetch every subscription synchronously inside a slash command -- that is
         # the foreground-network hazard cmd_sync deliberately avoids.
         try:
@@ -553,6 +586,12 @@ def cmd_feed(args):
 
 
 def refresh_feeds(force=False):
+    """Run at most one network refresh across concurrent Claude sessions."""
+    with tbstate.try_locked("feeds.refresh.lock") as acquired:
+        return _refresh_feeds(force) if acquired else 0
+
+
+def _refresh_feeds(force=False):
     """Pull new entries into the queue. Best effort -- never raises."""
     data = load_feeds()
     if not data["feeds"]:
@@ -578,15 +617,26 @@ def refresh_feeds(force=False):
         # an arbitrary 500 links rather than the most recent, so old articles came back.
         seen = list(dict.fromkeys(entry.get("seen") or []))
         seen_set = set(seen)
-        fresh = [item for item in items if item["link"] not in seen_set][:MAX_NEW_ITEMS_PER_FEED]
-        for item in fresh:
+        fresh = [item for item in items if item["link"] not in seen_set]
+        try:
+            retry_cursor = int(entry.get("retry_cursor") or 0)
+        except (TypeError, ValueError):
+            retry_cursor = 0
+        retry_cursor = retry_cursor % len(fresh) if fresh else 0
+        ordered = fresh[retry_cursor:] + fresh[:retry_cursor]
+        attempts = ordered[:MAX_FEED_FETCH_ATTEMPTS]
+        entry["retry_cursor"] = ((retry_cursor + len(attempts)) % len(fresh)
+                                 if fresh else 0)
+        staged_for_feed = 0
+        for item in attempts:
+            if staged_for_feed >= MAX_NEW_ITEMS_PER_FEED:
+                break
             if item["link"] in staged_links:
                 staged_seen.append((entry, item["link"]))
                 continue
             try:
                 article_meta, text = article.load(item["link"])
             except Exception:
-                seen.append(item["link"])
                 continue
             article_meta["title"] = item.get("title") or article_meta.get("title")
             try:
@@ -596,6 +646,7 @@ def refresh_feeds(force=False):
             staged.append(prepared)
             staged_links.add(item["link"])
             staged_seen.append((entry, item["link"]))
+            staged_for_feed += 1
         entry["seen"] = seen[-500:]
     added = 0
     if staged:
@@ -624,6 +675,7 @@ def refresh_feeds(force=False):
                 float(live.get("last_checked") or 0),
                 float(refreshed.get("last_checked") or 0),
             )
+            live["retry_cursor"] = refreshed.get("retry_cursor", 0)
             combined = list(dict.fromkeys(
                 list(live.get("seen") or []) + list(refreshed.get("seen") or [])
             ))
@@ -669,13 +721,19 @@ def is_our_statusline(entry):
         command = entry if isinstance(entry, str) else ""
     if not command or SCRIPT_NAME not in command:
         return False
-    if any(name in command for name in (
-            "thinking-book", "thinking_book", "claude-and-prejudice")):
-        return True
-    # Installed under some other directory name: check the script sits beside our CLI.
+    known_roots = {
+        "thinking-book", "thinking_book", "claude-thinking-book",
+        "claude-and-prejudice",
+    }
     for candidate in _path_candidates(command):
         if os.path.basename(candidate) != SCRIPT_NAME:
             continue
+        # Missing historical plugin caches can only be identified by an exact path
+        # component. Substrings and unrelated command arguments are not ownership proof.
+        components = set(os.path.normpath(candidate).split(os.sep))
+        if components & known_roots:
+            return True
+        # Installed under some other directory name: check the script sits beside our CLI.
         if os.path.exists(os.path.join(os.path.dirname(candidate), "thinking_book.py")):
             return True
     return False
@@ -723,7 +781,7 @@ def after_interactive_import():
               % book_command("on"))
         return
 
-    sync_spinner(config)
+    sync_spinner()
     if not config["surfaces"]["statusline"]:
         return
     enabled, reason = enable_statusline(auto=True)
@@ -881,16 +939,15 @@ def cmd_display(args):
         tbstate.update_config(lambda config: config.update({
             "paused": False,
             "surfaces": {"statusline": False, "spinner": True},
-        }))
+        }), reset_timer=True)
     else:
         enable_statusline(auto=False)
         _set_hud(choice == "hud")
         tbstate.update_config(lambda config: config.update({
             "paused": False,
             "surfaces": {"statusline": True, "spinner": True},
-        }))
-    tbstate.write_last_advance()
-    sync_spinner(tbstate.load_config())
+        }), reset_timer=True)
+    sync_spinner()
     print("Display: %s." % choice)
 
 
@@ -898,7 +955,7 @@ def cmd_display(args):
 
 def _display_title(item_id, title):
     """Never let missing, whitespace-only, or legacy index titles leak into the UI."""
-    return " ".join(str(title or "").split()) or item_id
+    return tbstate.terminal_label(title, fallback=item_id)
 
 
 def _pace_label(config):
@@ -910,6 +967,7 @@ def _pace_label(config):
 
 def _queue_entries(rows=None):
     """Human-facing queue state, derived once for status, listing, and selection."""
+    tbstate.consume_statusline_progress()
     rows = tbstate.load_index() if rows is None else rows
     total = tbstate.stream_count()
     current = tbstate.locate_position(tbstate.read_pos(), rows=rows, total=total)
@@ -1001,7 +1059,7 @@ def cmd_dashboard(args):
         return
 
     meta = tbstate.item_meta(active["id"])
-    author = meta.get("author") if isinstance(meta, dict) else None
+    author = tbstate.terminal_label(meta.get("author")) if isinstance(meta, dict) else None
     heading = "Book: %s%s" % (active["title"], " — %s" % author if author else "")
     percent = (active["offset"] * 100) // max(1, active["length"])
     surfaces = config["surfaces"]
@@ -1173,23 +1231,25 @@ def cmd_open(args):
         raise SystemExit("usage: %s" % book_command("open <number-or-title>"))
     query = " ".join(args).strip()
     with tbstate.locked():
-        rows = tbstate.load_index()
-        total = tbstate.stream_count()
-        selected = _resolve_queue_item(query, rows=rows)
-        tbstate.capture_position(rows=rows)
-        item_id, title = selected["id"], selected["title"]
-        offset = tbstate.load_bookmarks().get(item_id, 1)
-        position = tbstate.resolve_position(item_id, offset, rows=rows, total=total)
-        if position is None:
-            raise SystemExit("%s is no longer in your library; run %s and try again."
-                             % (title, book_command("library")))
-        tbstate.write_pos(position)
-        tbstate.write_last_advance()
-        resolved = tbstate.locate_position(position, rows=rows, total=total)
-        offset = resolved[1] if resolved else 1
-        tbstate.save_bookmark(item_id, offset)
+        with tbstate.turn_guard():
+            tbstate.consume_statusline_progress(guard=False)
+            rows = tbstate.load_index()
+            total = tbstate.stream_count()
+            selected = _resolve_queue_item(query, rows=rows)
+            tbstate.capture_position(rows=rows)
+            item_id, title = selected["id"], selected["title"]
+            offset = tbstate.load_bookmarks().get(item_id, 1)
+            position = tbstate.resolve_position(item_id, offset, rows=rows, total=total)
+            if position is None:
+                raise SystemExit("%s is no longer in your library; run %s and try again."
+                                 % (title, book_command("library")))
+            tbstate.write_pos(position)
+            tbstate.write_last_advance()
+            resolved = tbstate.locate_position(position, rows=rows, total=total)
+            offset = resolved[1] if resolved else 1
+            tbstate.save_bookmark(item_id, offset)
     config = tbstate.load_config()
-    line = sync_spinner(config)
+    line = sync_spinner()
     percent = (offset * 100) // max(1, selected["length"])
     if os.environ.get("THINKING_BOOK_COMMAND") in ("book", "tb"):
         print("Opened %s at %d/%d (%d%%): %s" % (
@@ -1211,9 +1271,8 @@ def cmd_mode(args):
         raise SystemExit("usage: %s" % book_command(
             "mode %s" % "|".join(tbstate.VALID_MODES)))
     _clear_stop_suppression()
-    tbstate.update_config(lambda config: config.update({"mode": args[0]}))
-    if args[0] == "timer":
-        tbstate.write_last_advance()
+    tbstate.update_config(
+        lambda config: config.update({"mode": args[0]}), reset_timer=True)
     print("Advance mode: %s" % args[0])
 
 
@@ -1223,9 +1282,8 @@ def cmd_pace(args):
     if tbstate.stream_count() and not tbstate.stream_has_word_counts():
         with tbstate.rebuilding_stream():
             pass
-    config = tbstate.update_config(lambda live: live.update({"words_per_minute": wpm}))
-    if config["mode"] == "timer":
-        tbstate.write_last_advance()
+    config = tbstate.update_config(
+        lambda live: live.update({"words_per_minute": wpm}), reset_timer=True)
     message = "Timer pace: %d words per minute." % wpm
     if config["mode"] != "timer":
         message += " Timer mode is off -- run %s to use it." % book_command("mode timer")
@@ -1237,9 +1295,7 @@ def cmd_dwell(args):
         args, "usage: %s" % book_command("dwell <1-86400 seconds>"), 1, 86400)
     config = tbstate.update_config(lambda live: live.update({
         "dwell_seconds": seconds, "words_per_minute": None,
-    }))
-    if config["mode"] == "timer":
-        tbstate.write_last_advance()
+    }), reset_timer=True)
     message = "Timer interval: %d seconds." % config["dwell_seconds"]
     if config["mode"] != "timer":
         message += " Timer mode is off -- run %s to use it." % book_command("mode timer")
@@ -1248,14 +1304,14 @@ def cmd_dwell(args):
 
 def cmd_pause(_args):
     _clear_stop_suppression()
-    config = tbstate.update_config(lambda live: live.update({"paused": True}))
-    line = sync_spinner(config)
+    tbstate.update_config(lambda live: live.update({"paused": True}))
+    line = sync_spinner()
     print("Paused on: %s" % (line or "(nothing queued)"))
 
 
 def cmd_resume(_args):
-    tbstate.update_config(lambda config: config.update({"paused": False}))
-    tbstate.write_last_advance()
+    tbstate.update_config(
+        lambda config: config.update({"paused": False}), reset_timer=True)
     print("Resumed.")
 
 
@@ -1280,10 +1336,9 @@ def cmd_on(_args):
     tbstate.update_config(lambda config: config.update({
         "paused": False,
         "surfaces": {"statusline": True, "spinner": True},
-    }))
+    }), reset_timer=True)
     enable_statusline(auto=False)
-    tbstate.write_last_advance()
-    sync_spinner(tbstate.load_config())
+    sync_spinner()
     print("thinking-book is on. Reading surfaces enabled.")
 
 
@@ -1361,11 +1416,10 @@ def cmd_reader(_args):
         sync_spinner()
 
     def pause():
-        config = tbstate.update_config(
-            lambda live: live.update({"paused": not live["paused"]}))
-        if not config["paused"]:
-            tbstate.write_last_advance()
-        sync_spinner(config)
+        tbstate.update_config(
+            lambda live: live.update({"paused": not live["paused"]}),
+            reset_timer=True)
+        sync_spinner()
 
     def pace(delta):
         def mutate(config):
@@ -1374,9 +1428,8 @@ def cmd_reader(_args):
                 "mode": "timer", "paused": False,
                 "words_per_minute": max(30, min(1000, current + delta)),
             })
-        config = tbstate.update_config(mutate)
-        tbstate.write_last_advance()
-        sync_spinner(config)
+        tbstate.update_config(mutate, reset_timer=True)
+        sync_spinner()
 
     return reader.run(
         state, lambda: advance(1), lambda: advance(-1), pause,
@@ -1511,7 +1564,7 @@ def _statusline_origin_record(config):
 
 
 def _repair_moved_statusline(config):
-    """Repoint our missing absolute script path after a plugin cache upgrade."""
+    """Repoint an older positively identified plugin script after an upgrade."""
     if not config["surfaces"]["statusline"]:
         return False
     live = as_statusline_entry(tbsettings.current_statusline())
@@ -1523,7 +1576,7 @@ def _repair_moved_statusline(config):
         return False
     old_script = next((candidate for candidate in _path_candidates(command)
                        if os.path.basename(candidate) == SCRIPT_NAME), None)
-    if not old_script or os.path.exists(old_script):
+    if not old_script:
         return False
     tbsettings.set_statusline(
         expected, padding=live.get("padding"),
@@ -1535,7 +1588,6 @@ def _repair_moved_statusline(config):
 def cmd_sync(args):
     """SessionStart: make sure the plumbing exists, then show where we left off."""
     tbstate.ensure_home()
-    tbsettings.ensure_settings_file()
     try:
         os.unlink(statusline_live_path())
     except OSError:
@@ -1545,28 +1597,46 @@ def cmd_sync(args):
     except OSError:
         pass
     prune_statusline_markers()
-    config = tbstate.load_config()
-    try:
-        _repair_moved_statusline(config)
-    except (OSError, tbsettings.SettingsError):
-        # Repair is opportunistic; damaged settings must not prevent local stream recovery.
-        pass
-    tbstate.write_hot_env(config)
-    generation_dir = tbstate.stream_generation_dir()
+    with tbstate.locked("config.lock"):
+        config = tbstate.load_config()
+        if any(config["surfaces"].values()):
+            tbsettings.ensure_settings_file()
+        try:
+            _repair_moved_statusline(config)
+        except (OSError, tbsettings.SettingsError):
+            # Repair is opportunistic; damaged settings cannot prevent stream recovery.
+            pass
+        tbstate.write_hot_state(config)
     queue_items = tbstate.load_queue()["items"]
-    if queue_items and (tbstate.stream_count() == 0 or not tbstate.stream_generation()
-                        or not generation_dir or not os.path.isdir(generation_dir)
-                        or not tbstate.stream_has_index()
-                        or (config.get("words_per_minute")
-                            and not tbstate.stream_has_word_counts())):
+    if not queue_items and os.path.exists(tbstate.path("stream.gen")):
+        tbstate.retire_stream_if_queue_empty()
+    elif queue_items and not tbstate.stream_is_healthy(
+            queue_items, require_word_counts=bool(config.get("words_per_minute"))):
         with tbstate.rebuilding_stream():
             pass
-    line = sync_spinner(config)
-    if not config["paused"] and _feeds_due():
-        try:
-            _spawn_feed_refresh()
-        except Exception:
+    elif queue_items and config.get("hud") and not tbstate.ensure_hud_shards():
+        with tbstate.rebuilding_stream(include_hud=True):
             pass
+    total = tbstate.stream_count()
+    if total:
+        try:
+            with tbstate.turn_guard(timeout=0.05):
+                # Publication may have changed while SessionStart repaired the caches.
+                total = tbstate.stream_count()
+                position = tbstate.read_pos()
+                clamped = min(position, total) if total else 1
+                if clamped != position:
+                    tbstate.write_pos(clamped)
+        except RuntimeError:
+            pass
+    line = sync_spinner()
+    with tbstate.locked("config.lock"):
+        live_config = tbstate.load_config()
+        if not live_config["paused"] and _feeds_due():
+            try:
+                _spawn_feed_refresh()
+            except Exception:
+                pass
     _report(args, line or "Nothing queued — try %s."
             % book_command("<title|url|file>"))
 
@@ -1578,29 +1648,31 @@ def cmd_advance(args):
     far more often. If that surface is off, this is the only clock we have, so it applies
     the dwell check itself.
     """
-    config = tbstate.load_config()
     if _consume_stop_suppression():
-        line = sync_spinner(config)
+        line = sync_spinner()
         _report(args, line or "Nothing queued.")
         return
-    if config["paused"] or tbstate.stream_count() == 0:
-        line = sync_spinner(config)
-        _report(args, line or "Nothing queued.")
-        return
-
-    mode = config["mode"]
-    if mode == "turn":
-        advance_by(1)
-    elif mode == "timer" and not (
-            config["surfaces"]["statusline"] and os.path.exists(statusline_live_path())):
-        last = tbstate.read_last_advance()
-        if not last:
-            # Cold start: show this line and start the clock rather than skipping it.
-            tbstate.write_last_advance()
-        elif time.time() - last >= tbstate.timer_interval(
-                tbstate.stream_record(tbstate.read_pos())[0], config):
-            advance_by(1)
-    line = sync_spinner(config)
+    try:
+        with tbstate.turn_guard(timeout=0.05):
+            config = tbstate.load_config()
+            if not config["paused"] and tbstate.stream_count():
+                mode = config["mode"]
+                if mode == "turn":
+                    advance_by(1)
+                elif mode == "timer" and not (
+                        config["surfaces"]["statusline"]
+                        and os.path.exists(statusline_live_path())):
+                    last = tbstate.read_last_advance()
+                    if not last:
+                        # Cold start: show this line before turning it.
+                        tbstate.write_last_advance()
+                    elif time.time() - last >= tbstate.timer_interval(
+                            tbstate.stream_record(tbstate.read_pos())[0], config):
+                        advance_by(1)
+    except RuntimeError:
+        # A concurrent import owns the cursor. Missing one hook turn is harmless.
+        pass
+    line = sync_spinner()
     _report(args, line or "Nothing queued.")
 
 

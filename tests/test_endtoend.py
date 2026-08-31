@@ -391,6 +391,20 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(json_result.returncode, 0, json_result.stderr)
         self.assertIn("Library Book", json_result.stdout)
 
+    def test_add_auto_detects_id_keyed_libby_highlights(self):
+        path = os.path.join(self.config_dir, "mapped-journey.json")
+        with open(path, "w") as fh:
+            json.dump({
+                "title": "Mapped Library Book",
+                "highlights": {"annotation-id": {"text": "Mapped quote."}},
+            }, fh)
+
+        result = self.run_cli("add", path)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Mapped Library Book", result.stdout)
+        self.assertEqual(self.tbstate.stream_line(1), "Mapped quote.")
+
     def test_add_detects_readwise_json_without_an_author_field(self):
         path = os.path.join(self.config_dir, "readwise.json")
         with open(path, "w") as fh:
@@ -401,6 +415,46 @@ class RoundTripTest(IsolatedStateCase):
         result = self.run_cli("add", path)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("2 highlight book(s)", result.stdout)
+
+    def test_add_routes_libby_book_metadata_before_a_chapter_title(self):
+        path = os.path.join(self.config_dir, "libby-journey.json")
+        with open(path, "w") as fh:
+            json.dump({
+                "title": "Piranesi",
+                "author": "Susanna Clarke",
+                "highlights": [{
+                    "title": "Part 1",
+                    "text": "The Beauty of the House is immeasurable.",
+                }],
+            }, fh)
+
+        result = self.run_cli("add", path)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Piranesi", result.stdout)
+        queued = self.tbstate.load_queue()["items"]
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(self.tbstate.item_meta(queued[0])["title"], "Piranesi")
+
+    def test_add_keeps_an_explicit_readwise_book_title_signal(self):
+        path = os.path.join(self.config_dir, "readwise-export.json")
+        with open(path, "w") as fh:
+            json.dump({
+                "title": "Readwise export",
+                "highlights": [{
+                    "Book Title": "The Left Hand of Darkness",
+                    "Author": "Ursula K. Le Guin",
+                    "Highlight": "To learn which questions are unanswerable.",
+                }],
+            }, fh)
+
+        result = self.run_cli("add", path)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("highlight book", result.stdout)
+        queued = self.tbstate.load_queue()["items"]
+        self.assertEqual(
+            self.tbstate.item_meta(queued[0])["title"], "The Left Hand of Darkness")
 
     def test_start_imports_a_chosen_book_and_applies_all_defaults_once(self):
         result = self.run_cli("start", self.book)
@@ -1204,6 +1258,28 @@ class RoundTripTest(IsolatedStateCase):
         self.assertIn("Removed untitled", removed.stdout)
         self.assertIn("Library is empty", removed.stdout)
 
+    def test_imported_metadata_cannot_write_terminal_control_sequences(self):
+        import thinking_book
+        title = "\x1b]8;;https://invalid.example\x07Bad\nTitle\x1b]8;;\x07"
+        author = "\x1b[31mRed\x1b[0m\tAuthor"
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            thinking_book._install(
+                "hostile-meta", {"title": title, "author": author, "kind": "book"},
+                "A readable sentence.",
+            )
+
+        output = stdout.getvalue()
+        self.assertNotIn("\x1b", output)
+        self.assertNotIn("\x07", output)
+        self.assertIn("Queued Bad Title by Red Author", output)
+        dashboard = self.run_cli("status")
+        self.assertEqual(dashboard.returncode, 0, dashboard.stderr)
+        self.assertNotIn("\x1b", dashboard.stdout)
+        self.assertNotIn("\x07", dashboard.stdout)
+        self.assertIn("Book: Bad Title — Red Author", dashboard.stdout)
+
     def test_blank_title_from_an_old_stream_index_is_repaired_when_displayed(self):
         self.tbstate.save_item("untitled", {"title": "  ", "kind": "book"}, ["line"])
         self.tbstate.save_queue({"items": ["untitled"]})
@@ -1283,6 +1359,100 @@ class RoundTripTest(IsolatedStateCase):
         self.assertIn("2/3", reopened.stdout)
         self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "b2")
         self.assertLess(abs(self.tbstate.read_last_advance() - time.time()), 3)
+
+    def test_automatic_crossing_remembers_the_end_of_the_previous_book(self):
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        self.tbstate.write_pos(1)
+
+        self.run_cli("next", "2")
+        reopened = self.run_cli("open", "Alpha")
+
+        self.assertEqual(reopened.returncode, 0, reopened.stderr)
+        self.assertIn("2/2", reopened.stdout)
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "a2")
+
+    def test_statusline_timer_crossing_remembers_the_previous_book(self):
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        config = self.tbstate.load_config()
+        config.update({"mode": "timer", "dwell_seconds": 1, "words_per_minute": None})
+        self.tbstate.save_config(config)
+        self.tbstate.write_pos(2)
+        self.tbstate.write_last_advance(time.time() - 10)
+
+        self.run_statusline()
+        self.assertEqual(self.tbstate.read_pos(), 3)
+        reopened = self.run_cli("open", "Alpha")
+
+        self.assertEqual(reopened.returncode, 0, reopened.stderr)
+        self.assertIn("2/2", reopened.stdout)
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "a2")
+
+    def test_rebuild_preserves_a_pending_statusline_boundary_bookmark(self):
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        config = self.tbstate.load_config()
+        config.update({"mode": "timer", "dwell_seconds": 1, "words_per_minute": None})
+        self.tbstate.save_config(config)
+        self.tbstate.write_pos(2)
+        self.tbstate.write_last_advance(time.time() - 10)
+        self.run_statusline()
+
+        with self.tbstate.rebuilding_stream():
+            self.tbstate.save_item("c", {"title": "Gamma", "kind": "book"}, ["c1"])
+            self.tbstate.save_queue({"items": ["a", "b", "c"]})
+        reopened = self.run_cli("open", "Alpha")
+
+        self.assertEqual(reopened.returncode, 0, reopened.stderr)
+        self.assertIn("2/2", reopened.stdout)
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "a2")
+
+    def test_explicit_turn_preserves_a_pending_statusline_boundary_bookmark(self):
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1", "b2"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        config = self.tbstate.load_config()
+        config.update({"mode": "timer", "dwell_seconds": 1, "words_per_minute": None})
+        self.tbstate.save_config(config)
+        self.tbstate.write_pos(2)
+        self.tbstate.write_last_advance(time.time() - 10)
+        self.run_statusline()
+
+        self.run_cli("next")
+        reopened = self.run_cli("open", "Alpha")
+
+        self.assertEqual(reopened.returncode, 0, reopened.stderr)
+        self.assertIn("2/2", reopened.stdout)
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "a2")
+
+    def test_open_preserves_a_pending_timer_boundary_bookmark(self):
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "Beta", "kind": "book"}, ["b1"])
+        self.tbstate.save_item("c", {"title": "Gamma", "kind": "book"}, ["c1"])
+        self.tbstate.save_queue({"items": ["a", "b", "c"]})
+        self.tbstate.rebuild_stream()
+        config = self.tbstate.load_config()
+        config.update({"mode": "timer", "dwell_seconds": 1, "words_per_minute": None})
+        self.tbstate.save_config(config)
+        self.tbstate.write_pos(2)
+        self.tbstate.write_last_advance(time.time() - 10)
+        self.run_statusline()
+
+        opened = self.run_cli("open", "Gamma")
+        reopened = self.run_cli("open", "Alpha")
+
+        self.assertEqual(opened.returncode, 0, opened.stderr)
+        self.assertEqual(reopened.returncode, 0, reopened.stderr)
+        self.assertIn("2/2", reopened.stdout)
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "a2")
 
     def test_open_reports_ambiguous_titles(self):
         self.tbstate.save_item("a", {"title": "The Sea", "kind": "book"}, ["a1"])

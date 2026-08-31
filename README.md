@@ -240,15 +240,16 @@ publishes them through one atomic generation pointer. Optional HUD metadata shar
 added atomically beside them. The shell reads one prose shard and, only when the HUD is
 enabled, one matching metadata shard. Longer passages from older libraries wrap at the
 terminal edge instead of being clipped, while normal lines keep the same fast path.
-Across 200 invocations on the development Mac at line 25,000 of 25,000, compact manual mode
-measured 6.95 ms median (7.43 ms p95); the 250 WPM timer measured 9.55 ms median
-(10.74 ms p95), and the graphical HUD measured 11.79 ms median (12.89 ms p95), against a
-5 s timeout.
+Across 120 warmed invocations on the development Mac at line 25,000 of 25,000, compact
+manual mode measured 6.38 ms median (6.77 ms p95); the 250 WPM timer measured 8.78 ms
+median (9.11 ms p95), and the graphical HUD measured 10.84 ms median (11.57 ms p95),
+against a 5 s timeout. A clean Stop hook measured 3.44 ms median (3.85 ms p95).
 
 State lives in `~/.claude/thinking-book/`. JSON files are the human-readable record;
-flat one-value files (`pos`, `last`, `hot.env`) and self-contained immutable stream
-generations keep the hot path to shell builtins plus one bounded lookup. A 25,000-fragment
-stream rebuild measured 34 ms; the book is not duplicated into a second full-stream cache.
+inert flat state (`pos`, `last`, `status.control`, `status.prefix`) and self-contained
+immutable stream generations keep the hot path to shell builtins plus one bounded lookup.
+A 25,000-fragment stream rebuild measured 45.6 ms; the book is not duplicated into a
+second full-stream cache.
 
 ## Honest limitations
 

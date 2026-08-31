@@ -1,10 +1,27 @@
 import os
+import threading
+import time
 import unittest
+from unittest import mock
 
 from support import IsolatedStateCase
 
 
 class StreamTest(IsolatedStateCase):
+    def test_rebuild_sanitizes_terminal_controls_in_legacy_fragments(self):
+        self.tbstate.save_item(
+            "legacy", {"title": "Legacy", "kind": "book"},
+            ["Safe \x9b31mred\x9b0m invoice\u202egpj.exe."],
+        )
+        self.tbstate.save_queue({"items": ["legacy"]})
+
+        self.tbstate.rebuild_stream()
+
+        line = self.tbstate.stream_line(1)
+        self.assertNotIn("\x9b", line)
+        self.assertNotIn("\u202e", line)
+        self.assertIn("Safe", line)
+
     def test_compact_default_does_not_write_unused_hud_shards(self):
         self.seed_stream(["one", "two"], mode="manual")
         self.assertFalse(os.path.exists(os.path.join(
@@ -98,10 +115,14 @@ class StreamTest(IsolatedStateCase):
 
     def test_empty_items_are_skipped_without_breaking_the_index(self):
         self.tbstate.save_item("empty", {"title": "Nothing", "kind": "book"}, [])
+        self.tbstate.save_item(
+            "controls", {"title": "Controls", "kind": "book"}, ["\x1b[31m"],
+        )
         self.tbstate.save_item("real", {"title": "Something", "kind": "book"}, ["x1"])
-        self.tbstate.save_queue({"items": ["empty", "real"]})
+        self.tbstate.save_queue({"items": ["empty", "controls", "real"]})
         self.assertEqual(self.tbstate.rebuild_stream(), 1)
         self.assertEqual(self.tbstate.item_at(1)[1], "real")
+        self.assertTrue(self.tbstate.stream_is_healthy(["empty", "controls", "real"]))
 
     def test_metadata_newlines_cannot_corrupt_the_stream_index(self):
         self.tbstate.save_item("a", {"title": "Bad\nTitle", "kind": "book"}, ["a1"])
@@ -150,6 +171,82 @@ class StreamTest(IsolatedStateCase):
 
 
 class ConfigTest(IsolatedStateCase):
+    def test_terminal_labels_sanitize_fallback_text_too(self):
+        self.assertEqual(
+            self.tbstate.terminal_label("", fallback="\x1b[31mFallback\x1b[0m\nName"),
+            "Fallback Name",
+        )
+
+    def test_invisible_terminal_label_uses_its_fallback(self):
+        self.assertEqual(
+            self.tbstate.terminal_label("\u00ad\u200b\ufeff", fallback="book-id"),
+            "book-id",
+        )
+
+    def test_nonblocking_lock_skips_duplicate_background_work(self):
+        with self.tbstate.try_locked("refresh.lock") as first:
+            with self.tbstate.try_locked("refresh.lock") as second:
+                self.assertTrue(first)
+                self.assertFalse(second)
+
+    def test_turn_guard_is_reentrant_within_one_command(self):
+        with self.tbstate.turn_guard():
+            with self.tbstate.turn_guard():
+                self.assertTrue(os.path.isdir(self.tbstate.path("turn.lock.d")))
+        self.assertFalse(os.path.exists(self.tbstate.path("turn.lock.d")))
+
+    def test_turn_guard_quarantines_a_stale_regular_file_lock(self):
+        lock = self.tbstate.path("turn.lock.d")
+        with open(lock, "w") as fh:
+            fh.write("corrupt")
+        os.utime(lock, (1, 1))
+
+        with self.tbstate.turn_guard(timeout=0.1):
+            self.assertTrue(os.path.isdir(lock))
+
+        self.assertFalse(os.path.exists(lock))
+        self.assertTrue(any(name.startswith("turn.lock.stale.")
+                            for name in os.listdir(self.tbstate.home())))
+
+    def test_turn_guard_quarantines_a_stale_lock_with_junk(self):
+        lock = self.tbstate.path("turn.lock.d")
+        os.mkdir(lock)
+        with open(os.path.join(lock, "junk"), "w") as fh:
+            fh.write("left by a killed process")
+        os.utime(lock, (1, 1))
+
+        with self.tbstate.turn_guard(timeout=0.1):
+            self.assertTrue(os.path.isdir(lock))
+
+        self.assertFalse(os.path.exists(lock))
+
+    def test_turn_guard_treats_an_impossible_owner_pid_as_corrupt(self):
+        lock = self.tbstate.path("turn.lock.d")
+        os.mkdir(lock)
+        with open(os.path.join(lock, "owner"), "w") as fh:
+            fh.write("999999999999\n")
+        os.utime(lock, (1, 1))
+
+        with self.tbstate.turn_guard(timeout=0.1):
+            pass
+
+        self.assertFalse(os.path.exists(lock))
+
+    def test_turn_guard_never_follows_a_corrupt_lock_symlink(self):
+        outside = os.path.join(self.config_dir, "outside-lock-target")
+        os.mkdir(outside)
+        owner = os.path.join(outside, "owner")
+        with open(owner, "w") as fh:
+            fh.write("preserve me")
+        lock = self.tbstate.path("turn.lock.d")
+        os.symlink(outside, lock)
+
+        with self.tbstate.turn_guard(timeout=0.1):
+            pass
+
+        with open(owner) as fh:
+            self.assertEqual(fh.read(), "preserve me")
+
     def test_defaults_applied_to_partial_config(self):
         self.tbstate.write_json(self.tbstate.path("config.json"), {"mode": "manual"})
         config = self.tbstate.load_config()
@@ -208,28 +305,52 @@ class ConfigTest(IsolatedStateCase):
                     {"statusline": True, "spinner": True},
                 )
 
-    def test_hot_env_quotes_awkward_values(self):
+    def test_status_prefix_keeps_awkward_values_as_inert_data(self):
         config = self.tbstate.load_config()
         config["prefix"] = "it's $(rm -rf /) "
         self.tbstate.save_config(config)
-        with open(self.tbstate.path("hot.env")) as fh:
-            contents = fh.read()
-        self.assertIn("TB_PREFIX='it'\\''s $(rm -rf /) '", contents)
+        with open(self.tbstate.path("status.prefix")) as fh:
+            self.assertEqual(fh.read(), "it's $(rm -rf /) \n")
 
-    def test_hud_defaults_off_and_is_mirrored_to_the_hot_cache(self):
+    def test_status_prefix_strips_terminal_commands_but_keeps_spacing(self):
+        config = self.tbstate.load_config()
+        config["prefix"] = "\x1b]0;bad\x07\x1b[31mBook:\u202e "
+        self.tbstate.save_config(config)
+
+        with open(self.tbstate.path("status.prefix")) as fh:
+            self.assertEqual(fh.read(), "Book: \n")
+        self.assertEqual(self.tbstate.terminal_prefix(config["prefix"]), "Book: ")
+        self.assertFalse(os.path.exists(self.tbstate.path("hot.env")))
+
+    def test_newlines_in_status_prefix_are_flattened(self):
+        config = self.tbstate.load_config()
+        config["prefix"] = "chapter\r\none\n"
+        self.tbstate.save_config(config)
+        with open(self.tbstate.path("status.prefix")) as fh:
+            self.assertEqual(fh.read(), "chapter  one \n")
+
+    def test_hud_defaults_off_and_is_mirrored_to_status_control(self):
         config = self.tbstate.load_config()
         self.assertFalse(config["hud"])
         config["hud"] = True
         self.tbstate.save_config(config)
-        with open(self.tbstate.path("hot.env")) as fh:
-            self.assertIn("TB_HUD=1", fh.read())
+        with open(self.tbstate.path("status.control")) as fh:
+            self.assertEqual(fh.read(), "1 timer 8 250 0 1 1\n")
 
-    def test_wpm_is_mirrored_to_the_hot_cache(self):
+    def test_wpm_is_mirrored_to_status_control(self):
         config = self.tbstate.load_config()
         config["words_per_minute"] = 250
         self.tbstate.save_config(config)
-        with open(self.tbstate.path("hot.env")) as fh:
-            self.assertIn("TB_WPM='250'", fh.read())
+        with open(self.tbstate.path("status.control")) as fh:
+            self.assertEqual(fh.read(), "1 timer 8 250 0 1 0\n")
+
+    def test_status_control_writer_clamps_legacy_timer_values(self):
+        config = self.tbstate.load_config()
+        config["dwell_seconds"] = 0
+        config["words_per_minute"] = 20
+        self.tbstate.save_config(config)
+        with open(self.tbstate.path("status.control")) as fh:
+            self.assertEqual(fh.read(), "1 timer 1 30 0 1 0\n")
 
     def test_non_boolean_hud_config_falls_back_to_off(self):
         for bad in ("off", 1, ["on"], None):
@@ -237,21 +358,94 @@ class ConfigTest(IsolatedStateCase):
                 self.tbstate.write_json(self.tbstate.path("config.json"), {"hud": bad})
                 self.assertFalse(self.tbstate.load_config()["hud"])
 
-    def test_identical_config_update_does_not_rewrite_config_or_hot_cache(self):
+    def test_identical_config_update_does_not_rewrite_config_or_status_cache(self):
         self.tbstate.save_config(self.tbstate.load_config())
         before = (
             os.stat(self.tbstate.path("config.json")).st_ino,
-            os.stat(self.tbstate.path("hot.env")).st_ino,
+            os.stat(self.tbstate.path("status.control")).st_ino,
+            os.stat(self.tbstate.path("status.prefix")).st_ino,
         )
         self.tbstate.update_config(lambda _config: None)
         after = (
             os.stat(self.tbstate.path("config.json")).st_ino,
-            os.stat(self.tbstate.path("hot.env")).st_ino,
+            os.stat(self.tbstate.path("status.control")).st_ino,
+            os.stat(self.tbstate.path("status.prefix")).st_ino,
         )
         self.assertEqual(after, before)
 
 
 class PositionTest(IsolatedStateCase):
+    def test_new_timer_clock_rounds_up_to_avoid_an_early_boundary_turn(self):
+        with mock.patch.object(self.tbstate.time, "time", return_value=100.01):
+            self.tbstate.write_last_advance()
+        self.assertEqual(self.tbstate.read_last_advance(), 101)
+
+    def test_timer_progress_is_mapped_before_a_concurrent_rebuild(self):
+        self.tbstate.save_item("a", {"title": "A"}, ["a1"])
+        self.tbstate.save_item("b", {"title": "B"}, ["b1"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        generation = self.tbstate.stream_generation()
+        self.tbstate.write_pos(2)
+        self.tbstate.atomic_write(
+            self.tbstate.path("statusline.progress"), "%s 1 2\n" % generation)
+        entered = threading.Event()
+        rebuild_done = threading.Event()
+        original_count = self.tbstate.stream_count
+        calls = {"count": 0}
+
+        def blocked_count():
+            calls["count"] += 1
+            if calls["count"] == 1:
+                entered.set()
+                rebuild_done.wait(0.25)
+            return original_count()
+
+        def replace_stream():
+            entered.wait(2)
+            with self.tbstate.rebuilding_stream():
+                self.tbstate.save_item("x", {"title": "X"}, ["x1"])
+                self.tbstate.save_queue({"items": ["x", "a", "b"]})
+            rebuild_done.set()
+
+        worker = threading.Thread(target=replace_stream)
+        worker.start()
+        with mock.patch.object(self.tbstate, "stream_count", side_effect=blocked_count):
+            self.tbstate.consume_statusline_progress()
+        worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        bookmarks = self.tbstate.load_bookmarks()
+        self.assertNotIn("x", bookmarks)
+        self.assertEqual(bookmarks.get("a"), 1)
+        self.assertEqual(bookmarks.get("b"), 1)
+
+    def test_read_only_progress_consumer_skips_a_busy_turn_without_losing_state(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        generation = self.tbstate.stream_generation()
+        progress = self.tbstate.path("statusline.progress")
+        self.tbstate.atomic_write(progress, "%s 1 2\n" % generation)
+        acquired = threading.Event()
+        release = threading.Event()
+
+        def hold_turn():
+            with self.tbstate.turn_guard():
+                acquired.set()
+                release.wait(2)
+
+        worker = threading.Thread(target=hold_turn)
+        worker.start()
+        self.assertTrue(acquired.wait(2))
+        started = time.monotonic()
+        consumed = self.tbstate.consume_statusline_progress()
+        elapsed = time.monotonic() - started
+        release.set()
+        worker.join(timeout=2)
+
+        self.assertFalse(consumed)
+        self.assertLess(elapsed, 0.5)
+        self.assertTrue(os.path.exists(progress))
+
     def test_position_defaults_to_one(self):
         self.assertEqual(self.tbstate.read_pos(), 1)
 

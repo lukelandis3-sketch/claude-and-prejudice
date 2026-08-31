@@ -3,6 +3,7 @@
 import io
 import os
 import sys
+import unicodedata
 import unittest
 from unittest import mock
 
@@ -64,6 +65,54 @@ class ReadKeyTest(unittest.TestCase):
         self.assertEqual(reader.action_for(self._send(b"\x1b[B")), "advance")
         self.assertEqual(reader.action_for(self._send(b"\x1b[A")), "back")
 
+    def test_fragmented_arrow_waits_for_its_escape_sequence(self):
+        ready = ([sys.stdin], [], [])
+        with mock.patch.object(reader.select, "select", side_effect=[ready, ready]), \
+                mock.patch.object(reader.os, "read", side_effect=[b"\x1b", b"[C"]):
+            key = reader.read_key(2.0)
+
+        self.assertEqual(key, "\x1b[C")
+        self.assertEqual(reader.action_for(key), "advance")
+
+    def test_unknown_escape_sequences_are_ignored_instead_of_quitting(self):
+        for raw in (b"\x1b[5~", b"\x1bOP"):
+            with self.subTest(raw=raw):
+                key = self._send(raw)
+                self.assertNotEqual(key, "\x1b")
+                self.assertIsNone(reader.action_for(key))
+
+    def test_fragmented_unknown_escape_is_consumed_as_one_key(self):
+        ready = ([sys.stdin], [], [])
+        with mock.patch.object(reader.select, "select", side_effect=[ready, ready]), \
+                mock.patch.object(reader.os, "read", side_effect=[b"\x1b[", b"5~"]):
+            key = reader.read_key(2.0)
+
+        self.assertEqual(key, "\x1b[5~")
+        self.assertIsNone(reader.action_for(key))
+
+    def test_modified_and_application_mode_arrows_still_turn_pages(self):
+        for raw, expected in (
+                (b"\x1b[1;5C", "advance"), (b"\x1b[1;2D", "back"),
+                (b"\x1bOC", "advance"), (b"\x1bOD", "back")):
+            with self.subTest(raw=raw):
+                self.assertEqual(reader.action_for(self._send(raw)), expected)
+
+    def test_bare_escape_waits_only_for_the_bounded_grace(self):
+        waits = []
+
+        def selected(_readers, _writers, _errors, timeout):
+            waits.append(timeout)
+            return ([sys.stdin], [], []) if len(waits) == 1 else ([], [], [])
+
+        with mock.patch.object(reader.select, "select", side_effect=selected), \
+                mock.patch.object(reader.os, "read", return_value=b"\x1b"):
+            key = reader.read_key(2.0)
+
+        self.assertEqual(reader.action_for(key), "quit")
+        self.assertEqual(len(waits), 2)
+        self.assertGreater(waits[1], 0)
+        self.assertLessEqual(waits[1], reader.ESCAPE_GRACE_SECONDS)
+
     def test_plain_keys_still_work(self):
         self.assertEqual(reader.action_for(self._send(b" ")), "advance")
         self.assertEqual(reader.action_for(self._send(b"q")), "quit")
@@ -81,6 +130,15 @@ class ReadKeyTest(unittest.TestCase):
 
 
 class FrameTest(unittest.TestCase):
+    @staticmethod
+    def _display_width(value):
+        return sum(
+            0 if unicodedata.combining(character)
+            else 2 if unicodedata.east_asian_width(character) in ("W", "F")
+            else 1
+            for character in value
+        )
+
     def test_wraps_to_the_given_width(self):
         line = "Call me Ishmael. " * 8
         for row in reader.frame(line, "Moby Dick", 1, 100, width=40):
@@ -107,6 +165,14 @@ class FrameTest(unittest.TestCase):
     def test_narrow_terminal_is_survivable(self):
         for row in reader.frame("Some prose here.", "A Very Long Book Title", 3, 9, width=10):
             self.assertLessEqual(len(row), 10)
+
+    def test_wide_glyphs_never_overflow_the_terminal(self):
+        rows = reader.frame(
+            "abcdefghijk", "海辺の本", 1, 1, width=10, height=6,
+            context=[("abcdefghijk", True)],
+        )
+        for row in rows:
+            self.assertLessEqual(self._display_width(row), 10, repr(row))
 
     def test_context_marks_the_current_line_and_respects_height(self):
         context = [

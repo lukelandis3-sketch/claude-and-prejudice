@@ -24,52 +24,63 @@ def _first_string(mapping, keys):
     return None
 
 
-def _collect(node, found):
+def _collect(node, found, candidate=False):
     """Walk the export and collect anything that looks like a highlight."""
     if isinstance(node, dict):
-        text = _first_string(node, TEXT_KEYS)
-        if text:
-            found.append({
-                "text": text,
-                "chapter": _first_string(node, ("chapter", "chapterTitle", "title")),
-                "percent": node.get("percent") or node.get("percentComplete"),
-            })
-            return
+        if candidate:
+            text = _first_string(node, TEXT_KEYS)
+            if text:
+                found.append({
+                    "text": text,
+                    "chapter": _first_string(node, ("chapter", "chapterTitle", "title")),
+                    "percent": node.get("percent") or node.get("percentComplete"),
+                })
+                return
         for key in HIGHLIGHT_KEYS:
-            if isinstance(node.get(key), list):
-                _collect(node[key], found)
-        for value in node.values():
+            if isinstance(node.get(key), (dict, list)):
+                _collect(node[key], found, candidate=True)
+        for key, value in node.items():
+            if key in HIGHLIGHT_KEYS:
+                continue
             if isinstance(value, (dict, list)) and not isinstance(value, str):
-                _collect(value, found)
+                # Some exports key highlights by an opaque annotation id instead of
+                # storing them in a list. Once inside a known highlight container,
+                # its mapping values remain highlight candidates.
+                _collect(value, found, candidate=candidate)
     elif isinstance(node, list):
         for item in node:
-            _collect(item, found)
+            _collect(item, found, candidate=candidate)
 
 
 def _title_and_author(payload):
     title = author = None
-    if isinstance(payload, dict):
+    candidates = [payload] if isinstance(payload, dict) else []
+    for key in ("readingJourney", "book", "media", "publication"):
+        value = payload.get(key) if isinstance(payload, dict) else None
+        if isinstance(value, dict):
+            candidates.append(value)
+    for candidate in candidates:
         for key in ("title", "bookTitle", "name"):
-            value = payload.get(key)
+            value = candidate.get(key)
             if isinstance(value, str) and value.strip():
-                title = value.strip()
+                title = title or value.strip()
                 break
             if isinstance(value, dict):
                 nested = value.get("text") or value.get("main")
                 if isinstance(nested, str) and nested.strip():
-                    title = nested.strip()
+                    title = title or nested.strip()
                     break
         for key in ("author", "creator", "firstCreatorName"):
-            value = payload.get(key)
+            value = candidate.get(key)
             if isinstance(value, str) and value.strip():
-                author = value.strip()
+                author = author or value.strip()
                 break
     return title, author
 
 
 def load(path):
     path = os.path.abspath(os.path.expanduser(path))
-    with open(path, encoding="utf-8", errors="replace") as fh:
+    with open(path, encoding="utf-8-sig", errors="replace") as fh:
         payload = json.load(fh)
 
     found = []

@@ -12,7 +12,8 @@ import os
 import select
 import shutil
 import sys
-import textwrap
+import time
+import unicodedata
 
 ADVANCE_KEYS = {" ", "n", "j", "\x1b[C", "\x1b[B"}   # space, n, j, right, down
 BACK_KEYS = {"b", "k", "\x1b[D", "\x1b[A"}           # b, k, left, up
@@ -23,19 +24,88 @@ FASTER_KEYS = {"+", "="}
 SLOWER_KEYS = {"-"}
 
 POLL_SECONDS = 1.0
+ESCAPE_GRACE_SECONDS = 0.03
 FOOTER_HINT = "space/→ next · ← back · p pause · +/- pace · q quit"
 ENTER_SCREEN = "\x1b[?1049h\x1b[?25l"
 EXIT_SCREEN = "\x1b[?25h\x1b[?1049l"
 _PENDING = bytearray()
 
 
+def _character_width(character):
+    if (unicodedata.combining(character)
+            or unicodedata.category(character) in ("Cf", "Me", "Mn")):
+        return 0
+    return 2 if unicodedata.east_asian_width(character) in ("W", "F") else 1
+
+
+def _display_width(value):
+    return sum(_character_width(character) for character in value)
+
+
+def _truncate_cells(value, width):
+    """Truncate text to terminal cells, not Python code points."""
+    result, used = [], 0
+    for character in value:
+        cells = _character_width(character)
+        if used + cells > width:
+            break
+        result.append(character)
+        used += cells
+    return "".join(result)
+
+
+def _cell_chunks(value, width):
+    """Break one whitespace-free word without producing an over-wide row."""
+    chunks, current, used = [], [], 0
+    for character in value:
+        cells = _character_width(character)
+        if cells > width:
+            if current:
+                chunks.append("".join(current))
+                current, used = [], 0
+            chunks.append("?")
+            continue
+        if current and used + cells > width:
+            chunks.append("".join(current))
+            current, used = [], 0
+        current.append(character)
+        used += cells
+    if current:
+        chunks.append("".join(current))
+    return chunks or [""]
+
+
+def _wrap_cells(value, width):
+    """A compact word wrapper that understands common terminal glyph widths."""
+    width = max(1, width)
+    words = str(value or "").split()
+    if not words:
+        return [""]
+    lines, current = [], ""
+    for word in words:
+        if current and _display_width(current) + 1 + _display_width(word) <= width:
+            current += " " + word
+            continue
+        if current:
+            lines.append(current)
+            current = ""
+        chunks = _cell_chunks(word, width)
+        lines.extend(chunks[:-1])
+        current = chunks[-1]
+    if current or not lines:
+        lines.append(current)
+    return lines
+
+
 def action_for(key):
     """Map a keypress to an action name. Unknown keys do nothing at all."""
     if key in QUIT_KEYS:
         return "quit"
-    if key in ADVANCE_KEYS:
+    arrow = (key[-1:] if isinstance(key, str)
+             and (key.startswith("\x1b[") or key.startswith("\x1bO")) else "")
+    if key in ADVANCE_KEYS or arrow in ("B", "C"):
         return "advance"
-    if key in BACK_KEYS:
+    if key in BACK_KEYS or arrow in ("A", "D"):
         return "back"
     if key in REDRAW_KEYS:
         return "redraw"
@@ -58,21 +128,24 @@ def frame(line, title, position, total, width=80, mode=None, context=None, heigh
     body, current_rows = [], []
     for passage, current in passages:
         prefix = "📖 " if current else "  "
-        content_width = max(1, width - len(prefix))
-        wrapped = textwrap.wrap(passage, width=content_width) or [""]
+        if _display_width(prefix) >= width:
+            prefix = ""
+        content_width = max(1, width - _display_width(prefix))
+        wrapped = _wrap_cells(passage, content_width)
         if current:
             current_rows.append(len(body))
-        body.append((prefix + wrapped[0])[:width])
-        body.extend((" " * len(prefix) + row)[:width] for row in wrapped[1:])
+        body.append(_truncate_cells(prefix + wrapped[0], width))
+        indent = " " * _display_width(prefix)
+        body.extend(_truncate_cells(indent + row, width) for row in wrapped[1:])
 
     percent = (position / total * 100) if total else 0.0
     left = "%s — %d/%d (%.1f%%)" % (title or "untitled", position, total, percent)
     if mode:
         left += " · %s" % mode
     if height >= 6:
-        trailer = ["", FOOTER_HINT[:width], left[:width]]
+        trailer = ["", _truncate_cells(FOOTER_HINT, width), _truncate_cells(left, width)]
     elif height >= 4:
-        trailer = [left[:width]]
+        trailer = [_truncate_cells(left, width)]
     else:
         trailer = []
 
@@ -89,39 +162,79 @@ def clear_pending_keys():
     del _PENDING[:]
 
 
-def _take_pending():
+def _take_pending(force=False):
     if not _PENDING:
         return None
-    if (len(_PENDING) >= 3 and _PENDING[0] == 0x1b and _PENDING[1] == ord("[")
-            and _PENDING[2] in b"ABCD"):
-        raw = bytes(_PENDING[:3])
-        del _PENDING[:3]
-        return raw.decode("ascii")
+    if _PENDING[0] == 0x1b:
+        if len(_PENDING) == 1:
+            if not force:
+                return None
+            del _PENDING[0]
+            return "\x1b"
+        if _PENDING[1] == ord("["):
+            for offset, byte in enumerate(_PENDING[2:], 2):
+                if 0x40 <= byte <= 0x7e:
+                    raw = bytes(_PENDING[:offset + 1])
+                    del _PENDING[:offset + 1]
+                    return raw.decode("latin1")
+                if not (0x20 <= byte <= 0x3f):
+                    break
+            else:
+                if not force:
+                    return None
+            length = len(_PENDING)
+            raw = bytes(_PENDING[:length])
+            del _PENDING[:length]
+            return raw.decode("latin1")
+        if _PENDING[1] == ord("O") and len(_PENDING) < 3 and not force:
+            return None
+        length = min(len(_PENDING), 3 if _PENDING[1] == ord("O") else 2)
+        raw = bytes(_PENDING[:length])
+        del _PENDING[:length]
+        return raw.decode("latin1")
     raw = bytes([_PENDING[0]])
     del _PENDING[0]
     return raw.decode("utf-8", errors="replace")
+
+
+def _read_pending(timeout):
+    if not select.select([sys.stdin], [], [], timeout)[0]:
+        return False
+    try:
+        data = os.read(sys.stdin.fileno(), 32)
+    except OSError:
+        return False
+    if not data:
+        return False
+    _PENDING.extend(data)
+    return True
 
 
 def read_key(timeout=POLL_SECONDS):
     """One keypress, or None when the timeout expires so the caller can re-check state.
 
     Reads the raw descriptor rather than `sys.stdin.read(1)`: the text layer buffers, so a
-    one-byte read drained the whole arrow-key escape sequence off the fd and left the
-    caller holding a bare ESC -- which reads as "quit".
+    one-byte read drained the whole arrow-key escape sequence off the fd. A tiny bounded
+    grace joins an ESC that arrives just before the rest of its arrow sequence.
     """
     pending = _take_pending()
     if pending is not None:
         return pending
-    if not select.select([sys.stdin], [], [], timeout)[0]:
-        return None
-    try:
-        data = os.read(sys.stdin.fileno(), 32)
-    except OSError:
-        return None
-    if not data:
-        return None
-    _PENDING.extend(data)
-    return _take_pending()
+    if not _PENDING:
+        if not _read_pending(timeout):
+            return None
+        pending = _take_pending()
+        if pending is not None:
+            return pending
+
+    deadline = time.monotonic() + ESCAPE_GRACE_SECONDS
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not _read_pending(remaining):
+            return _take_pending(force=True)
+        pending = _take_pending()
+        if pending is not None:
+            return pending
 
 
 def run(state, on_advance, on_back, on_pause=None, on_faster=None, on_slower=None):

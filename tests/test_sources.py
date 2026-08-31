@@ -225,6 +225,17 @@ class LibbyTest(unittest.TestCase):
         _meta, text = libby.load(path)
         self.assertIn("A nested highlight.", text)
 
+    def test_handles_highlights_stored_in_an_id_keyed_object(self):
+        path = self._write({
+            "title": "Mapped Highlights",
+            "highlights": {
+                "highlight-1": {"text": "A dictionary-mapped highlight."},
+            },
+        })
+        meta, text = libby.load(path)
+        self.assertEqual(meta["title"], "Mapped Highlights")
+        self.assertEqual(text, "A dictionary-mapped highlight.")
+
     def test_deduplicates_repeated_highlights(self):
         path = self._write({"highlights": [{"text": "Same."}, {"text": "Same."}]})
         _meta, text = libby.load(path)
@@ -234,6 +245,34 @@ class LibbyTest(unittest.TestCase):
         path = self._write({"title": "Empty", "highlights": []})
         with self.assertRaises(LookupError):
             libby.load(path)
+
+    def test_accepts_a_utf8_bom(self):
+        path = os.path.join(self._tmp.name, "bom.json")
+        with open(path, "w", encoding="utf-8-sig") as fh:
+            json.dump({"title": "Book", "highlights": [{"text": "Quote."}]}, fh)
+        meta, text = libby.load(path)
+        self.assertEqual(meta["title"], "Book")
+        self.assertEqual(text, "Quote.")
+
+    def test_title_text_metadata_is_not_imported_as_a_fake_highlight(self):
+        path = self._write({
+            "title": {"text": "Piranesi"},
+            "highlights": [{"quote": "Actual quotation."}],
+        })
+        meta, text = libby.load(path)
+        self.assertEqual(meta["highlight_count"], 1)
+        self.assertEqual(text, "Actual quotation.")
+
+    def test_nested_reading_journey_metadata_is_preserved(self):
+        path = self._write({"readingJourney": {
+            "bookTitle": "Another Book",
+            "firstCreatorName": "Writer",
+            "annotations": [{"text": "A nested highlight."}],
+        }})
+        meta, text = libby.load(path)
+        self.assertEqual(meta["title"], "Another Book")
+        self.assertEqual(meta["author"], "Writer")
+        self.assertEqual(text, "A nested highlight.")
 
 
 class ClippingsTest(unittest.TestCase):
@@ -281,6 +320,16 @@ class ReadwiseTest(unittest.TestCase):
         groups = readwise.parse_rows(rows)
         self.assertEqual(groups[0][0]["title"], "Nested")
         self.assertEqual(groups[0][1], "A nested highlight.")
+
+    def test_nested_highlight_title_does_not_replace_its_parent_book(self):
+        payload = {"books": [{
+            "title": "The Book", "author": "Writer",
+            "highlights": [{"title": "Chapter 1", "text": "Quote."}],
+        }]}
+        groups = readwise.parse_rows(readwise._json_rows(payload))
+        self.assertEqual(groups[0][0]["title"], "The Book")
+        self.assertEqual(groups[0][0]["author"], "Writer")
+        self.assertEqual(groups[0][1], "Quote.")
 
     def test_exact_duplicates_are_removed(self):
         groups = readwise.parse_rows([
@@ -424,11 +473,56 @@ class FeedTest(unittest.TestCase):
         self.assertEqual(title, "Atom Feed")
         self.assertEqual(entries[0]["link"], "https://example.com/a")
 
+    def test_load_resolves_relative_rss_and_atom_links_against_the_feed(self):
+        fixtures = (
+            (
+                """<rss><channel><title>RSS</title>
+                <item><title>Entry</title><link>/posts/1</link></item>
+                </channel></rss>""",
+                "https://example.com/posts/1",
+            ),
+            (
+                """<feed xmlns="http://www.w3.org/2005/Atom"><title>Atom</title>
+                <entry><title>Entry</title><link href="posts/2"/></entry>
+                </feed>""",
+                "https://example.com/feeds/posts/2",
+            ),
+        )
+        for xml, expected in fixtures:
+            with self.subTest(expected=expected), mock.patch.object(
+                    feed.fetch, "get", return_value=xml):
+                _meta, entries = feed.load("https://example.com/feeds/latest.xml")
+                self.assertEqual(entries[0]["link"], expected)
+
+    def test_atom_links_inherit_xml_base(self):
+        atom = """<feed xmlns="http://www.w3.org/2005/Atom"
+                    xml:base="https://cdn.example/articles/">
+          <title>Atom</title><entry><title>One</title><link href="post-1"/></entry>
+        </feed>"""
+        with mock.patch.object(feed.fetch, "get", return_value=atom):
+            _meta, entries = feed.load("https://origin.example/feed.xml")
+        self.assertEqual(entries[0]["link"], "https://cdn.example/articles/post-1")
+
+    def test_rss_items_inherit_channel_xml_base(self):
+        rss = """<rss><channel xml:base="https://cdn.example/articles/">
+          <title>RSS</title><item><title>One</title><link>post-1</link></item>
+        </channel></rss>"""
+        with mock.patch.object(feed.fetch, "get", return_value=rss):
+            _meta, entries = feed.load("https://origin.example/feed.xml")
+        self.assertEqual(entries[0]["link"], "https://cdn.example/articles/post-1")
+
     def test_ignores_entries_without_links(self):
         rss = """<?xml version="1.0"?><rss><channel><title>T</title>
           <item><title>No link here</title></item>
         </channel></rss>"""
         _title, entries = feed.parse(rss)
+        self.assertEqual(entries, [])
+
+    def test_ignores_whitespace_only_atom_href(self):
+        atom = """<feed xmlns="http://www.w3.org/2005/Atom">
+          <entry><title>No link</title><link href="   "/></entry>
+        </feed>"""
+        _title, entries = feed.parse(atom, base_url="https://example.com/feed.xml")
         self.assertEqual(entries, [])
 
 

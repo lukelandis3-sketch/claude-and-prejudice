@@ -3,8 +3,8 @@
 Two kinds of state live side by side, deliberately:
 
   * JSON files (config.json, queue.json) are the human-readable record. Python owns them.
-  * Flat single-value files (pos, last) are the hot path. statusline.sh reads and writes
-    them on every assistant message, so they must be parseable with a single `cat`.
+  * Flat records and single-value files are the hot path. statusline.sh reads and writes
+    them on every assistant message, so they stay inert and shell-builtin-readable.
 
 Nothing is duplicated between the two -- each value has exactly one home.
 """
@@ -14,6 +14,8 @@ import fcntl
 import json
 import os
 import re
+import stat
+import threading
 import time
 from contextlib import contextmanager
 
@@ -32,6 +34,21 @@ DEFAULT_CONFIG = {
 VALID_MODES = ("timer", "turn", "manual")
 STREAM_SHARD_LINES = 256
 STREAM_FORMAT = "2"  # word-count prefix + tab + prose
+
+_TERMINAL_OSC = re.compile(
+    r"\x1b\](?:[^\x07\x1b]|\x1b(?!\\))*(?:\x07|\x1b\\)"
+)
+_TERMINAL_ESCAPE = re.compile(
+    r"(?:\x1b\[[0-?]*[ -/]*[@-~]|\x9b[0-?]*[ -/]*[@-~]|\x1b[@-_])"
+)
+_TERMINAL_BIDI = re.compile(r"[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+_TERMINAL_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_TERMINAL_INVISIBLE = re.compile(r"[\u00ad\u200b\ufeff]")
+_TERMINAL_UNSAFE = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u00ad\u061c\u200b\u200e\u200f"
+    r"\u202a-\u202e\u2066-\u2069\ufeff]"
+)
+_TURN_LOCAL = threading.local()
 
 
 def config_dir():
@@ -57,6 +74,38 @@ def settings_path():
 def ensure_home():
     os.makedirs(path("library"), exist_ok=True)
     return home()
+
+
+def terminal_label(value, fallback="", limit=160):
+    """Collapse untrusted metadata to safe, compact terminal text."""
+    def clean(raw):
+        raw = str(raw or "")
+        collapsed = " ".join(raw.split())
+        if not _TERMINAL_UNSAFE.search(collapsed):
+            return collapsed
+        text = _TERMINAL_OSC.sub("", raw)
+        text = _TERMINAL_ESCAPE.sub("", text)
+        text = _TERMINAL_BIDI.sub("", text)
+        text = _TERMINAL_CONTROL.sub(" ", text)
+        text = _TERMINAL_INVISIBLE.sub("", text)
+        return " ".join(text.split())
+
+    text = clean(value)
+    if not text:
+        text = clean(fallback)
+    if limit and len(text) > limit:
+        text = "…" if limit == 1 else text[:limit - 1].rstrip() + "…"
+    return text
+
+
+def terminal_prefix(value, limit=64):
+    """Sanitize a display prefix without collapsing its intentional trailing space."""
+    text = _TERMINAL_OSC.sub("", str(value or ""))
+    text = _TERMINAL_ESCAPE.sub("", text)
+    text = _TERMINAL_BIDI.sub("", text)
+    text = _TERMINAL_CONTROL.sub(" ", text)
+    text = _TERMINAL_INVISIBLE.sub("", text)
+    return text[:limit] if limit else text
 
 
 # --------------------------------------------------------------------------- writes
@@ -118,9 +167,132 @@ def locked(name="tb.lock"):
         fh.close()
 
 
+@contextmanager
+def try_locked(name):
+    """Yield False instead of waiting when another background worker owns the lock."""
+    ensure_home()
+    fh = open(path(name), "a+")
+    acquired = False
+    try:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                raise
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        fh.close()
+
+
+def _release_turn_lock(lock_dir):
+    try:
+        is_directory = stat.S_ISDIR(os.lstat(lock_dir).st_mode)
+    except OSError:
+        is_directory = False
+    if is_directory:
+        try:
+            os.unlink(os.path.join(lock_dir, "owner"))
+        except OSError:
+            pass
+    try:
+        os.rmdir(lock_dir)
+    except OSError:
+        pass
+
+
+def _turn_lock_is_stale(lock_dir):
+    """Recognise a dead shell/Python owner without stealing a live timer commit."""
+    try:
+        if not stat.S_ISDIR(os.lstat(lock_dir).st_mode):
+            return True
+    except OSError:
+        return True
+    raw = _read(os.path.join(lock_dir, "owner"), "").strip()
+    if raw.isdigit() and len(raw) <= 12:
+        try:
+            os.kill(int(raw), 0)
+        except ProcessLookupError:
+            return True
+        except (OSError, ValueError, OverflowError):
+            pass
+        else:
+            return False
+    try:
+        return time.time() - os.stat(lock_dir).st_mtime >= 1.0
+    except OSError:
+        return True
+
+
+def _reclaim_stale_turn_lock(lock_dir):
+    """Move an exact corrupt lock aside when ordinary empty-dir cleanup cannot."""
+    _release_turn_lock(lock_dir)
+    if not os.path.lexists(lock_dir):
+        return True
+    quarantine = path("turn.lock.stale.%d.%x" % (os.getpid(), time.time_ns()))
+    try:
+        os.replace(lock_dir, quarantine)
+        return True
+    except OSError:
+        return False
+
+
+@contextmanager
+def turn_guard(timeout=1.0):
+    """Serialize cursor commits with publication using one POSIX directory lock.
+
+    The status-line shell cannot use Python's advisory lock on macOS. A tiny lock
+    directory gives both runtimes one portable guard across the generation switch;
+    stale owners are reclaimed by the next Python operation.
+    """
+    depth = getattr(_TURN_LOCAL, "depth", 0)
+    if depth:
+        _TURN_LOCAL.depth = depth + 1
+        try:
+            yield
+        finally:
+            _TURN_LOCAL.depth = depth
+        return
+
+    ensure_home()
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    lock_dir = path("turn.lock.d")
+    while True:
+        try:
+            os.mkdir(lock_dir)
+        except OSError as exc:
+            if exc.errno != errno.EEXIST:
+                raise
+            if _turn_lock_is_stale(lock_dir):
+                if _reclaim_stale_turn_lock(lock_dir):
+                    continue
+            if time.monotonic() >= deadline:
+                raise RuntimeError("reader is busy; try again")
+            time.sleep(0.01)
+            continue
+        try:
+            with open(os.path.join(lock_dir, "owner"), "w", encoding="ascii") as fh:
+                fh.write("%d\n" % os.getpid())
+        except BaseException:
+            _release_turn_lock(lock_dir)
+            raise
+        _TURN_LOCAL.depth = 1
+        try:
+            yield
+        finally:
+            _TURN_LOCAL.depth = 0
+            _release_turn_lock(lock_dir)
+        return
+
+
 def _read(target, default=""):
     try:
-        with open(target, encoding="utf-8") as fh:
+        with open(target, encoding="utf-8", errors="replace") as fh:
             return fh.read()
     except OSError as exc:
         if exc.errno not in (errno.ENOENT, errno.ENOTDIR):
@@ -139,7 +311,6 @@ def read_json(target, default):
 
 
 def write_json(target, data):
-    # One key per line: statusline.sh greps this file rather than parsing JSON.
     atomic_write(target, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
@@ -179,27 +350,40 @@ def load_config():
     return merged
 
 
-def _shell_quote(value):
-    return "'" + str(value).replace("'", "'\\''") + "'"
+def write_hot_state(config):
+    """Publish inert, fixed-field records for the shell hot paths.
 
-
-def write_hot_env(config):
-    """Mirror the values statusline.sh needs into a shell-sourceable file.
-
-    The hot path runs on every assistant message, so it must not parse JSON. Python is
-    the only writer of this file and config.json is the source of truth; this is a
-    derived cache, refreshed on every save_config.
+    Configuration remains JSON's responsibility. Shell hooks read these derived files
+    with builtins and validate every field; unlike the former hot.env, none is code.
+    Publish the prefix first and the control record last so a complete control record is
+    the readiness marker.
     """
-    lines = [
-        "TB_MODE=%s" % _shell_quote(config["mode"]),
-        "TB_DWELL=%s" % _shell_quote(int(config["dwell_seconds"])),
-        "TB_WPM=%s" % _shell_quote(int(config.get("words_per_minute") or 0)),
-        "TB_PAUSED=%s" % ("1" if config["paused"] else "0"),
-        "TB_STATUSLINE=%s" % ("1" if config["surfaces"]["statusline"] else "0"),
-        "TB_PREFIX=%s" % _shell_quote(config.get("prefix") or ""),
-        "TB_HUD=%s" % ("1" if config.get("hud") else "0"),
-    ]
-    atomic_write(path("hot.env"), "\n".join(lines) + "\n")
+    prefix = terminal_prefix(config.get("prefix"))
+    try:
+        dwell = min(86400, max(1, int(config.get("dwell_seconds", 8))))
+    except (TypeError, ValueError):
+        dwell = DEFAULT_CONFIG["dwell_seconds"]
+    wpm = config.get("words_per_minute")
+    if wpm is not None:
+        try:
+            wpm = min(1000, max(30, int(wpm)))
+        except (TypeError, ValueError):
+            wpm = DEFAULT_CONFIG["words_per_minute"]
+    wpm = int(wpm or 0)
+    atomic_write(path("status.prefix"), prefix + "\n")
+    atomic_write(path("status.control"), "1 %s %d %d %d %d %d\n" % (
+        config["mode"],
+        dwell,
+        wpm,
+        1 if config["paused"] else 0,
+        1 if config["surfaces"]["statusline"] else 0,
+        1 if config.get("hud") else 0,
+    ))
+    # Retire the executable legacy cache after both inert replacements are durable.
+    try:
+        os.unlink(path("hot.env"))
+    except OSError:
+        pass
     # The Stop hook needs only four enum/boolean fields. A fixed, non-executable record
     # lets POSIX sh read them with one builtin instead of sourcing a cache or starting
     # Python on every assistant response.
@@ -219,18 +403,22 @@ def save_config(config):
     except OSError:
         pass
     write_json(path("config.json"), config)
-    write_hot_env(config)
+    write_hot_state(config)
 
 
-def update_config(mutator):
+def update_config(mutator, reset_timer=False):
     """Locked read-modify-write for commands shared by concurrent sessions."""
-    with locked("config.lock"):
-        config = load_config()
-        before = json.loads(json.dumps(config))
-        mutator(config)
-        if (config != before or not os.path.exists(path("config.json"))
-                or not os.path.exists(path("hot.env"))):
-            save_config(config)
+    with turn_guard():
+        with locked("config.lock"):
+            config = load_config()
+            before = json.loads(json.dumps(config))
+            mutator(config)
+            if (config != before or not os.path.exists(path("config.json"))
+                    or not os.path.exists(path("status.control"))
+                    or not os.path.exists(path("status.prefix"))):
+                save_config(config)
+        if (reset_timer and config["mode"] == "timer" and not config["paused"]):
+            write_last_advance()
         return config
 
 
@@ -247,6 +435,10 @@ def read_pos():
 def write_pos(index):
     atomic_write(path("pos"), "%d\n" % max(1, int(index)))
     clear_finished()
+    try:
+        os.unlink(path("statusline.progress"))
+    except OSError:
+        pass
 
 
 def clear_finished():
@@ -277,7 +469,10 @@ def read_last_advance():
 
 
 def write_last_advance(when=None):
-    atomic_write(path("last"), "%d\n" % int(when if when is not None else time.time()))
+    # `date +%s` is integer-only in portable sh. Store the next whole second for fresh
+    # commits so crossing a wall-clock boundary milliseconds later cannot look overdue.
+    timestamp = int(when) if when is not None else int(time.time()) + 1
+    atomic_write(path("last"), "%d\n" % timestamp)
 
 
 # -------------------------------------------------------------------------- stream
@@ -286,9 +481,31 @@ def stream_path():
     return path("stream.txt")
 
 
+def retire_stream():
+    """Atomically make an empty queue unreadable without publishing a ghost stream."""
+    for target in (path("stream.gen"), path("finished"), path("spinner.cursor"),
+                   path("statusline.progress")):
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+    atomic_write(path("pos"), "1\n")
+
+
+def retire_stream_if_queue_empty():
+    """Retire a ghost only while queue mutation and timer commits are excluded."""
+    with locked():
+        with turn_guard():
+            if load_queue()["items"]:
+                return False
+            retire_stream()
+            return True
+
+
 def stream_generation():
     generation = _read(path("stream.gen"), "").strip()
-    return generation if re.fullmatch(r"[0-9a-f-]+", generation) else ""
+    return generation if (len(generation) <= 64
+                          and re.fullmatch(r"[0-9a-f-]+", generation)) else ""
 
 
 def stream_generation_dir(generation=None):
@@ -305,6 +522,84 @@ def stream_has_word_counts(generation=None):
 def stream_has_index(generation=None):
     directory = stream_generation_dir(generation)
     return bool(directory and os.path.isfile(os.path.join(directory, "index")))
+
+
+def stream_is_healthy(queue_items, require_word_counts=False):
+    """Cheap SessionStart validation for every cache needed by bounded lookups.
+
+    This deliberately uses metadata and file existence rather than scanning book prose.
+    A rebuild remains the source of truth whenever the queue/index relationship or an
+    immutable shard is missing or malformed.
+    """
+    generation = stream_generation()
+    directory = stream_generation_dir(generation) if generation else ""
+    if not directory or not os.path.isdir(directory):
+        return False
+    if require_word_counts and not stream_has_word_counts(generation):
+        return False
+
+    raw_count = _read(os.path.join(directory, "count"), "").strip()
+    if not re.fullmatch(r"[0-9]{1,12}", raw_count):
+        return False
+    total = int(raw_count)
+
+    raw_index = _read(os.path.join(directory, "index"), "")
+    index_lines = [line for line in raw_index.splitlines() if line.strip()]
+    rows = _parse_index(raw_index)
+    if len(rows) != len(index_lines):
+        return False
+    if bool(total) != bool(rows):
+        return False
+    starts = [row[0] for row in rows]
+    if rows and (starts[0] != 1
+                 or any(left >= right for left, right in zip(starts, starts[1:]))
+                 or starts[-1] > total):
+        return False
+
+    expected_ids = []
+    expected_total = 0
+    total_is_known = True
+    for item_id in queue_items:
+        fragments = item_fragments_path(item_id)
+        meta = item_meta(item_id)
+        meta = meta if isinstance(meta, dict) else {}
+        readable_count = meta.get("stream_fragments")
+        source_count = meta.get("fragments")
+        if not (isinstance(readable_count, int) and not isinstance(readable_count, bool)
+                and 0 <= readable_count <= 10**12):
+            readable_count = source_count
+        try:
+            readable = (readable_count != 0 and os.path.isfile(fragments)
+                        and os.path.getsize(fragments) > 0)
+        except OSError:
+            readable = False
+        if readable:
+            expected_ids.append(item_id)
+            if (isinstance(readable_count, int) and not isinstance(readable_count, bool)
+                    and 0 < readable_count <= 10**12):
+                expected_total += readable_count
+            else:
+                total_is_known = False
+    if [row[1] for row in rows] != expected_ids:
+        return False
+    if total_is_known and total != expected_total:
+        return False
+
+    expected_shards = (total + STREAM_SHARD_LINES - 1) // STREAM_SHARD_LINES
+    shard_fingerprints = _read(os.path.join(directory, "shards"), "").split()
+    if len(shard_fingerprints) != expected_shards:
+        return False
+    for shard, fingerprint in enumerate(shard_fingerprints):
+        match = re.fullmatch(r"([0-9]{1,12}):([0-9]{1,24})", fingerprint)
+        if not match:
+            return False
+        try:
+            info = os.stat(os.path.join(directory, "%d.txt" % shard))
+        except OSError:
+            return False
+        if info.st_size != int(match.group(1)) or info.st_mtime_ns != int(match.group(2)):
+            return False
+    return not total or bool(stream_record(total)[1])
 
 
 def _decode_stream_record(record):
@@ -345,7 +640,7 @@ def stream_record(index):
                 for number, line in enumerate(fh, 1):
                     if number == row:
                         return _decode_stream_record(line.rstrip("\n"))
-        except OSError:
+        except (OSError, UnicodeError):
             return 0, ""
         return 0, ""
     # Migration fallback: SessionStart rebuilds old streams into a generation.
@@ -354,7 +649,7 @@ def stream_record(index):
             for number, line in enumerate(fh, 1):
                 if number == index:
                     return _decode_stream_record(line.rstrip("\n"))
-    except OSError:
+    except (OSError, UnicodeError):
         return 0, ""
     return 0, ""
 
@@ -382,7 +677,7 @@ def stream_window(start, end):
                         break
                     if number >= start:
                         rows.append(_decode_stream_record(line.rstrip("\n"))[1])
-        except OSError:
+        except (OSError, UnicodeError):
             return []
         return rows
 
@@ -401,7 +696,7 @@ def stream_window(start, end):
                         break
                     if position >= start:
                         rows.append(_decode_stream_record(line.rstrip("\n"))[1])
-        except OSError:
+        except (OSError, UnicodeError):
             return []
     return rows
 
@@ -454,9 +749,7 @@ def timer_interval(words, config):
 
 
 def _hud_title(item_id, title, limit=38):
-    title = re.sub(r"[\x00-\x1f\x7f]+", " ", str(title or ""))
-    title = " ".join(title.split()) or item_id
-    return title if len(title) <= limit else title[:limit - 1].rstrip() + "…"
+    return terminal_label(title, fallback=item_id, limit=limit)
 
 
 def hud_line(item_id, title, offset, total):
@@ -477,11 +770,15 @@ def rebuild_stream(include_hud=None):
     hud_rows = [] if include_hud else None
     for item_id in queue["items"]:
         raw = _read(item_fragments_path(item_id), "")
-        lines = [ln for ln in raw.split("\n") if ln.strip()]
-        if not lines:
-            continue
+        lines = [terminal_label(line, limit=0) for line in raw.split("\n")]
+        lines = [line for line in lines if line]
         meta = item_meta(item_id)
         meta = meta if isinstance(meta, dict) else {}
+        if meta.get("stream_fragments") != len(lines):
+            meta["stream_fragments"] = len(lines)
+            write_json(path("library", item_id + ".json"), meta)
+        if not lines:
+            continue
         title = _hud_title(item_id, meta.get("title"), limit=10_000)
         kind = meta.get("kind", "text")
         index_rows.append("%d\t%s\t%s\t%s" % (line_no, item_id, kind, title))
@@ -513,19 +810,27 @@ def _publish_stream_generation(lines, hud_rows, index_rows):
         os.path.join(target, "index"),
         ("\n".join(index_rows) + "\n") if index_rows else "",
     )
+    shard_fingerprints = []
+    hud_fingerprints = [] if hud_rows is not None else None
     for start in range(0, len(lines), STREAM_SHARD_LINES):
         shard = lines[start:start + STREAM_SHARD_LINES]
         records = ["%d\t%s" % (min(1000, max(1, len(line.split()))), line)
                    for line in shard]
-        atomic_write(
-            os.path.join(target, "%d.txt" % (start // STREAM_SHARD_LINES)),
-            "\n".join(records) + "\n",
-        )
+        prose_shard = os.path.join(target, "%d.txt" % (start // STREAM_SHARD_LINES))
+        atomic_write(prose_shard, "\n".join(records) + "\n")
+        info = os.stat(prose_shard)
+        shard_fingerprints.append("%d:%d" % (info.st_size, info.st_mtime_ns))
         if hud_rows is not None:
-            atomic_write(
-                os.path.join(target, "%d.hud" % (start // STREAM_SHARD_LINES)),
-                "\n".join(hud_rows[start:start + STREAM_SHARD_LINES]) + "\n",
-            )
+            hud_shard = os.path.join(target, "%d.hud" % (start // STREAM_SHARD_LINES))
+            atomic_write(hud_shard,
+                         "\n".join(hud_rows[start:start + STREAM_SHARD_LINES]) + "\n")
+            info = os.stat(hud_shard)
+            hud_fingerprints.append("%d:%d" % (info.st_size, info.st_mtime_ns))
+    atomic_write(os.path.join(target, "shards"),
+                 " ".join(shard_fingerprints) + "\n")
+    if hud_fingerprints is not None:
+        atomic_write(os.path.join(target, "hud-shards"),
+                     " ".join(hud_fingerprints) + "\n")
     atomic_write(os.path.join(target, "count"), "%d\n" % len(lines))
     atomic_write(path("stream.gen"), generation + "\n")
 
@@ -591,10 +896,19 @@ def ensure_hud_shards():
                 or (text_shards and (min(text_shards) != 0
                                      or max(text_shards) != expected_shards - 1))):
             return False
-        missing = [start for start in range(0, total, STREAM_SHARD_LINES)
-                   if not os.path.isfile(os.path.join(
-                       directory, "%d.hud" % (start // STREAM_SHARD_LINES)))]
-        if not missing:
+        fingerprints = _read(os.path.join(directory, "hud-shards"), "").split()
+        invalid = []
+        for shard in range(expected_shards):
+            match = (re.fullmatch(r"([0-9]{1,12}):([0-9]{1,24})", fingerprints[shard])
+                     if len(fingerprints) == expected_shards else None)
+            try:
+                info = os.stat(os.path.join(directory, "%d.hud" % shard))
+            except OSError:
+                info = None
+            if (not match or not info or info.st_size != int(match.group(1))
+                    or info.st_mtime_ns != int(match.group(2))):
+                invalid.append(shard)
+        if not invalid:
             return True
 
         hud_rows = []
@@ -608,12 +922,19 @@ def ensure_hud_shards():
         if len(hud_rows) != total:
             return False
 
-        for start in missing:
-            target = os.path.join(directory, "%d.hud" % (start // STREAM_SHARD_LINES))
+        for shard in invalid:
+            start = shard * STREAM_SHARD_LINES
+            target = os.path.join(directory, "%d.hud" % shard)
             atomic_write(
                 target,
                 "\n".join(hud_rows[start:start + STREAM_SHARD_LINES]) + "\n",
             )
+        fingerprints = []
+        for shard in range(expected_shards):
+            info = os.stat(os.path.join(directory, "%d.hud" % shard))
+            fingerprints.append("%d:%d" % (info.st_size, info.st_mtime_ns))
+        atomic_write(os.path.join(directory, "hud-shards"),
+                     " ".join(fingerprints) + "\n")
         return True
 
 
@@ -691,6 +1012,72 @@ def save_bookmark(item_id, offset):
     write_json(path("bookmarks.json"), bookmarks)
 
 
+def remember_crossed_books(before, after):
+    """Persist boundary progress without writing bookmark JSON on ordinary turns."""
+    if before == after:
+        return
+    rows = load_index()
+    total = stream_count()
+    previous = locate_position(before, rows=rows, total=total)
+    current = locate_position(after, rows=rows, total=total)
+    if not previous or not current or previous[0] == current[0]:
+        return
+
+    bookmarks = load_bookmarks()
+    before_snapshot = dict(bookmarks)
+    if after > before:
+        for row in rows:
+            bounds = item_bounds(row[1], rows=rows, total=total)
+            if bounds and bounds[0] <= before <= bounds[1] and after > bounds[1]:
+                bookmarks[row[1]] = bounds[1] - bounds[0] + 1
+            elif bounds and before < bounds[0] and after > bounds[1]:
+                bookmarks[row[1]] = bounds[1] - bounds[0] + 1
+    else:
+        bookmarks[previous[0]] = previous[1]
+    bookmarks[current[0]] = current[1]
+    if bookmarks != before_snapshot:
+        write_json(path("bookmarks.json"), bookmarks)
+
+
+def consume_statusline_progress(guard=True):
+    """Merge shell timer turns while publication is excluded."""
+    if guard:
+        try:
+            with turn_guard(timeout=0.1):
+                return consume_statusline_progress(guard=False)
+        except RuntimeError:
+            # A foreground import owns the generation. Leave the record for the next
+            # hook/dashboard rather than making a read-only surface wait or fail.
+            return False
+    source = path("statusline.progress")
+    claimed = "%s.claim.%d" % (source, os.getpid())
+    try:
+        os.replace(source, claimed)
+    except OSError:
+        return
+    try:
+        try:
+            with open(claimed, encoding="utf-8") as fh:
+                raw = fh.read(256)
+        except (OSError, UnicodeError):
+            raw = ""
+    finally:
+        try:
+            os.unlink(claimed)
+        except OSError:
+            pass
+    parts = raw.split()
+    if len(parts) != 3 or parts[0] != stream_generation():
+        return
+    if (not parts[1].isdigit() or not parts[2].isdigit()
+            or len(parts[1]) > 12 or len(parts[2]) > 12):
+        return
+    before, after = int(parts[1]), int(parts[2])
+    total = stream_count()
+    if 1 <= before < after <= total:
+        remember_crossed_books(before, after)
+
+
 def capture_position(rows=None):
     """Persist and return the active item's logical bookmark."""
     position = read_pos()
@@ -734,8 +1121,10 @@ def restore_position(logical, old_items=None):
 def rebuilding_stream(include_hud=None):
     """Lock, snapshot the logical bookmark, then rebuild and restore it safely."""
     with locked():
-        logical = capture_position()
-        old_items = list(load_queue()["items"])
-        yield logical, old_items
-        rebuild_stream(include_hud=include_hud)
-        restore_position(logical, old_items=old_items)
+        with turn_guard():
+            consume_statusline_progress(guard=False)
+            logical = capture_position()
+            old_items = list(load_queue()["items"])
+            yield logical, old_items
+            rebuild_stream(include_hud=include_hud)
+            restore_position(logical, old_items=old_items)

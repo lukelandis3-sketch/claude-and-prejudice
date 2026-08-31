@@ -59,6 +59,20 @@ class ChunkerTest(unittest.TestCase):
         self.assertNotIn("\x1b", fragment)
         self.assertNotIn("\x07", fragment)
 
+    def test_remote_prose_cannot_emit_c1_osc_or_bidi_terminal_controls(self):
+        raw = (
+            "Safe \x9b31mred\x9b0m "
+            "\x1b]8;;https://invalid.example\x07link\x1b]8;;\x07 "
+            "invoice\u061c\u200e\u200f\u202egpj.exe."
+        )
+        fragment = chunker.to_fragments(raw)[0]
+        self.assertEqual(fragment, "Safe red link invoicegpj.exe.")
+        self.assertFalse(any(
+            ord(char) < 32 or 0x7f <= ord(char) <= 0x9f
+            or char in "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+            for char in fragment
+        ))
+
     def test_paragraphs_never_merge_into_one_fragment(self):
         # Regression: collapsing blank lines ran unrelated blocks together, producing
         # fragments like "By Herman Melville CONTENTS ETYMOLOGY."

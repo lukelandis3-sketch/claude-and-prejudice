@@ -54,6 +54,15 @@ class IdentityTest(unittest.TestCase):
         command = 'sh "/tmp/old claude-and-prejudice/scripts/statusline.sh"'
         self.assertTrue(tb.is_our_statusline(command))
 
+    def test_brand_substrings_do_not_claim_an_unrelated_statusline(self):
+        for root in ("my-thinking-book-theme", "claude-and-prejudice-notes"):
+            command = 'sh "/tmp/%s/statusline.sh"' % root
+            self.assertFalse(tb.is_our_statusline(command), command)
+
+    def test_brand_words_in_arguments_do_not_claim_an_unrelated_script(self):
+        command = 'sh "/tmp/other/statusline.sh" --theme thinking-book'
+        self.assertFalse(tb.is_our_statusline(command))
+
 
 class StatusLineEntryTest(unittest.TestCase):
     def test_a_string_becomes_a_command_entry(self):

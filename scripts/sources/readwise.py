@@ -37,11 +37,17 @@ def _json_rows(payload):
     for book in payload.get("books", []) if isinstance(payload.get("books"), list) else []:
         if not isinstance(book, dict):
             continue
+        parent_title = _value(book, "title")
+        parent_author = _value(book, "author")
         for highlight in book.get("highlights", []) if isinstance(book.get("highlights"), list) else []:
             if isinstance(highlight, dict):
                 row = dict(book)
                 row.pop("highlights", None)
                 row.update(highlight)
+                if parent_title:
+                    row["bookTitle"] = parent_title
+                if parent_author:
+                    row["author"] = parent_author
                 rows.append(row)
     return rows
 
@@ -75,10 +81,10 @@ def load(path):
     if path.lower().endswith(".json"):
         with open(path, encoding="utf-8-sig") as fh:
             rows = _json_rows(json.load(fh))
+        groups = parse_rows(rows, source=path)
     else:
         with open(path, encoding="utf-8-sig", newline="") as fh:
-            rows = list(csv.DictReader(fh))
-    groups = parse_rows(rows, source=path)
+            groups = parse_rows(csv.DictReader(fh), source=path)
     if not groups:
         raise LookupError("no Readwise highlights found in %s" % os.path.basename(path))
     return groups

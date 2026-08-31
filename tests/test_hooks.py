@@ -2,8 +2,12 @@
 
 import json
 import os
+import threading
 import time
 import unittest
+import contextlib
+import io
+from unittest import mock
 
 import support
 from support import IsolatedStateCase
@@ -32,16 +36,98 @@ class HookTest(IsolatedStateCase):
         self.assertTrue(os.path.exists(self.tbstate.settings_path()))
         self.assertEqual(self.spinner_line(), "First line.")
 
-    def test_sync_writes_hot_env_for_the_shell(self):
+    def test_sync_writes_inert_status_state_for_the_shell(self):
         self.seed_stream(["A line."])
-        os.unlink(self.tbstate.path("hot.env"))
+        os.unlink(self.tbstate.path("status.control"))
+        os.unlink(self.tbstate.path("status.prefix"))
         self.run_cli("sync")
-        self.assertTrue(os.path.exists(self.tbstate.path("hot.env")))
+        self.assertTrue(os.path.exists(self.tbstate.path("status.control")))
+        self.assertTrue(os.path.exists(self.tbstate.path("status.prefix")))
 
     def test_sync_does_not_publish_empty_generations_without_a_queue(self):
         self.run_cli("sync", "--quiet")
         self.run_cli("sync", "--quiet")
         self.assertFalse(os.path.exists(self.tbstate.path("stream.gen")))
+
+    def test_sync_retires_a_stale_stream_when_the_queue_is_empty(self):
+        self.seed_stream(["ghost prose"], mode="manual")
+        self.tbstate.save_queue({"items": []})
+
+        result = self.run_cli("sync", "--quiet")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(os.path.exists(self.tbstate.path("stream.gen")))
+        self.assertEqual(self.run_statusline().stdout, "")
+
+    def test_sync_cannot_retire_a_book_installed_during_empty_queue_repair(self):
+        self.seed_stream(["ghost prose"], mode="manual")
+        self.tbstate.save_queue({"items": []})
+        entered = threading.Event()
+        replacement_done = threading.Event()
+        original_retire = self.tbstate.retire_stream
+
+        def delayed_retire():
+            entered.set()
+            replacement_done.wait(0.25)
+            original_retire()
+
+        def install_replacement():
+            entered.wait(2)
+            with self.tbstate.rebuilding_stream():
+                self.tbstate.save_item(
+                    "replacement", {"title": "Replacement", "kind": "book"}, ["new prose"])
+                self.tbstate.save_queue({"items": ["replacement"]})
+            replacement_done.set()
+
+        worker = threading.Thread(target=install_replacement)
+        worker.start()
+        import thinking_book
+        with mock.patch.object(self.tbstate, "retire_stream", side_effect=delayed_retire):
+            thinking_book.cmd_sync(["--quiet"])
+        worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(self.tbstate.load_queue()["items"], ["replacement"])
+        self.assertTrue(self.tbstate.stream_generation())
+        self.assertEqual(self.tbstate.stream_line(1), "new prose")
+
+    def test_sync_cannot_reenable_surfaces_after_off_completes(self):
+        self.seed_stream(["one"], mode="manual")
+        entered = threading.Event()
+        release = threading.Event()
+        original_write_hot = self.tbstate.write_hot_state
+
+        def delayed_write_hot(config):
+            entered.set()
+            release.wait(5)
+            return original_write_hot(config)
+
+        import thinking_book
+        with mock.patch.object(self.tbstate, "write_hot_state", side_effect=delayed_write_hot):
+            sync = threading.Thread(target=thinking_book.cmd_sync, args=(["--quiet"],))
+            sync.start()
+            self.assertTrue(entered.wait(5), "sync did not reach hot-state publication")
+
+            def turn_off():
+                with contextlib.redirect_stdout(io.StringIO()):
+                    thinking_book.cmd_off([])
+
+            off = threading.Thread(target=turn_off)
+            off.start()
+            time.sleep(0.1)
+            release.set()
+            sync.join(timeout=5)
+            off.join(timeout=5)
+
+        self.assertFalse(sync.is_alive())
+        self.assertFalse(off.is_alive())
+        config = self.tbstate.load_config()
+        self.assertTrue(config["paused"])
+        self.assertEqual(config["surfaces"], {"statusline": False, "spinner": False})
+        with open(self.tbstate.path("status.control")) as fh:
+            self.assertEqual(fh.read().split()[4:7], ["1", "0", "0"])
+        self.assertNotIn("spinnerVerbs", self.settings())
 
     def test_sync_repoints_a_missing_statusline_from_an_older_install(self):
         import thinking_book
@@ -63,9 +149,26 @@ class HookTest(IsolatedStateCase):
         self.assertNotIn("statusLine", self.settings())
         self.assertEqual(self.settings()["theme"], "dark")
 
+    def test_sync_repoints_an_older_install_even_while_its_cache_still_exists(self):
+        import thinking_book
+        old_root = os.path.join(self.config_dir, "cache", "claude-and-prejudice")
+        old_scripts = os.path.join(old_root, "scripts")
+        os.makedirs(old_scripts)
+        for name in ("statusline.sh", "thinking_book.py"):
+            with open(os.path.join(old_scripts, name), "w") as fh:
+                fh.write("# old cache\n")
+        old = 'sh "%s"' % os.path.join(old_scripts, "statusline.sh")
+        with open(self.tbstate.settings_path(), "w") as fh:
+            json.dump({"statusLine": {"type": "command", "command": old}}, fh)
+
+        self.run_cli("sync", "--quiet")
+
+        self.assertEqual(
+            self.settings()["statusLine"]["command"], thinking_book.statusline_command())
+
     def test_sync_repair_restores_the_statusline_an_old_install_wrapped(self):
         import thinking_book
-        old = 'sh "/tmp/old-thinking-book/scripts/statusline.sh"'
+        old = 'sh "/tmp/claude-thinking-book/scripts/statusline.sh"'
         original = {"type": "command", "command": "my-prompt", "padding": 2}
         config = self.tbstate.load_config()
         config["wrapped_statusline"] = original
@@ -95,7 +198,8 @@ class HookTest(IsolatedStateCase):
     def test_malformed_settings_do_not_prevent_stream_recovery(self):
         import shutil
         self.seed_stream(["one", "two"], mode="manual")
-        os.unlink(self.tbstate.path("hot.env"))
+        os.unlink(self.tbstate.path("status.control"))
+        os.unlink(self.tbstate.path("status.prefix"))
         shutil.rmtree(self.tbstate.path("stream-generations"))
         with open(self.tbstate.settings_path(), "w") as fh:
             fh.write("{ broken")
@@ -105,7 +209,8 @@ class HookTest(IsolatedStateCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
-        self.assertTrue(os.path.exists(self.tbstate.path("hot.env")))
+        self.assertTrue(os.path.exists(self.tbstate.path("status.control")))
+        self.assertTrue(os.path.exists(self.tbstate.path("status.prefix")))
         self.assertEqual(self.tbstate.stream_line(1), "one")
 
     def test_sync_rebuilds_when_generation_directory_is_gone(self):
@@ -123,6 +228,43 @@ class HookTest(IsolatedStateCase):
         self.run_cli("sync", "--quiet")
         self.assertTrue(self.tbstate.stream_has_word_counts())
 
+    def test_sync_repairs_a_missing_hud_shard_when_hud_is_enabled(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        config = self.tbstate.load_config()
+        config["hud"] = True
+        self.tbstate.save_config(config)
+        self.tbstate.rebuild_stream(include_hud=True)
+        hud = os.path.join(self.tbstate.stream_generation_dir(), "0.hud")
+        os.unlink(hud)
+
+        result = self.run_cli("sync", "--quiet")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertTrue(os.path.isfile(hud))
+        self.assertIn("Test Item ·", self.run_statusline().stdout)
+
+    def test_sync_repairs_a_truncated_existing_hud_shard(self):
+        self.seed_stream(
+            ["line-%d" % number for number in range(300)], mode="manual")
+        config = self.tbstate.load_config()
+        config["hud"] = True
+        self.tbstate.save_config(config)
+        self.tbstate.rebuild_stream(include_hud=True)
+        hud = os.path.join(self.tbstate.stream_generation_dir(), "0.hud")
+        with open(hud) as fh:
+            first = fh.readline()
+        self.tbstate.atomic_write(hud, first)
+        self.tbstate.write_pos(2)
+
+        result = self.run_cli("sync", "--quiet")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        status = self.run_statusline().stdout.splitlines()
+        self.assertTrue(status[0].startswith("Test Item ·"), status)
+        self.assertIn("2/300", status[0])
+
     def test_sync_moves_a_legacy_root_index_into_the_generation(self):
         self.seed_stream(["one", "two"], mode="manual")
         generation_index = os.path.join(self.tbstate.stream_generation_dir(), "index")
@@ -135,6 +277,118 @@ class HookTest(IsolatedStateCase):
 
         self.assertTrue(self.tbstate.stream_has_index())
         self.assertFalse(os.path.exists(self.tbstate.path("stream.idx")))
+
+    def test_sync_repairs_a_malformed_generation_index(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        index = os.path.join(self.tbstate.stream_generation_dir(), "index")
+        self.tbstate.atomic_write(index, "garbage\n")
+
+        result = self.run_cli("sync", "--quiet")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertEqual([row[1] for row in self.tbstate.load_index()], ["test-item"])
+        self.assertEqual(self.tbstate.stream_line(2), "two")
+
+    def test_sync_repairs_a_count_that_truncates_the_last_passages(self):
+        self.seed_stream(["one", "two", "three"], mode="manual")
+        count = os.path.join(self.tbstate.stream_generation_dir(), "count")
+        self.tbstate.atomic_write(count, "1\n")
+
+        result = self.run_cli("sync", "--quiet")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.tbstate.stream_count(), 3)
+        self.assertEqual(self.tbstate.stream_line(3), "three")
+
+    def test_sync_repairs_a_truncated_intermediate_shard(self):
+        lines = ["line-%d" % number for number in range(600)]
+        self.seed_stream(lines, mode="manual")
+        shard = os.path.join(self.tbstate.stream_generation_dir(), "0.txt")
+        with open(shard) as fh:
+            first_record = fh.readline()
+        self.tbstate.atomic_write(shard, first_record)
+
+        result = self.run_cli("sync", "--quiet")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.tbstate.stream_line(2), "line-1")
+        self.assertEqual(self.tbstate.stream_line(600), "line-599")
+
+    def test_sync_repairs_same_size_invalid_utf8_in_a_shard(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        shard = os.path.join(self.tbstate.stream_generation_dir(), "0.txt")
+        with open(shard, "rb") as fh:
+            corrupted = bytearray(fh.read())
+        corrupted[2] = 0xff
+        self.tbstate.atomic_write_bytes(shard, bytes(corrupted))
+
+        result = self.run_cli("sync", "--quiet")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.tbstate.stream_line(1), "one")
+        self.assertEqual(self.tbstate.stream_line(2), "two")
+
+    def test_sync_repairs_a_stream_that_no_longer_matches_the_queue(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        self.tbstate.save_item(
+            "second-item", {"title": "Second Item", "kind": "book"}, ["three"])
+        self.tbstate.save_queue({"items": ["test-item", "second-item"]})
+
+        result = self.run_cli("sync", "--quiet")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.tbstate.stream_count(), 3)
+        self.assertEqual(
+            [row[1] for row in self.tbstate.load_index()],
+            ["test-item", "second-item"],
+        )
+        self.assertEqual(self.tbstate.stream_line(3), "three")
+
+    def test_sync_clamps_a_cursor_beyond_the_recovered_stream(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        self.tbstate.write_pos(999)
+
+        result = self.run_cli("sync", "--quiet")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.tbstate.read_pos(), 2)
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "two")
+
+    def test_sync_recovers_from_an_overlong_generation_pointer(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        self.tbstate.atomic_write(self.tbstate.path("stream.gen"), "a" * 10_000 + "\n")
+
+        result = self.run_cli("sync", "--quiet")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertLessEqual(len(self.tbstate.stream_generation()), 64)
+        self.assertEqual(self.tbstate.stream_line(1), "one")
+
+    def test_sync_while_fully_off_does_not_recreate_settings(self):
+        config = self.tbstate.load_config()
+        config["paused"] = True
+        config["surfaces"] = {"statusline": False, "spinner": False}
+        self.tbstate.save_config(config)
+        try:
+            os.unlink(self.tbstate.settings_path())
+        except OSError:
+            pass
+
+        result = self.run_cli("sync", "--quiet")
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(os.path.exists(self.tbstate.settings_path()))
 
     # -------------------------------------------------------------------- Stop: turn
 
@@ -220,6 +474,65 @@ class HookTest(IsolatedStateCase):
         self.tbstate.write_last_advance(time.time() - 5)
         self.run_cli("advance")
         self.assertEqual(self.pos(), 2)
+
+    def test_concurrent_timer_stop_hooks_advance_only_once(self):
+        self.seed_stream(
+            ["one", "two", "three"], mode="timer", dwell=1, statusline=False)
+        self.tbstate.write_last_advance(time.time() - 10)
+        first_reading = threading.Event()
+        second_reading = threading.Event()
+        calls = {"count": 0}
+        gate = threading.Lock()
+        original_read = self.tbstate.read_last_advance
+
+        def coordinated_read():
+            with gate:
+                calls["count"] += 1
+                number = calls["count"]
+            if number == 1:
+                first_reading.set()
+                second_reading.wait(0.25)
+            elif number == 2:
+                second_reading.set()
+            return original_read()
+
+        import thinking_book
+        with mock.patch.object(
+                self.tbstate, "read_last_advance", side_effect=coordinated_read):
+            first = threading.Thread(target=thinking_book.cmd_advance, args=(["--quiet"],))
+            second = threading.Thread(target=thinking_book.cmd_advance, args=(["--quiet"],))
+            first.start()
+            self.assertTrue(first_reading.wait(2))
+            second.start()
+            first.join(timeout=5)
+            second.join(timeout=5)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(self.tbstate.read_pos(), 2)
+
+    def test_busy_import_makes_quiet_stop_skip_instead_of_waiting(self):
+        self.seed_stream(["one", "two"], mode="turn")
+        acquired = threading.Event()
+        release = threading.Event()
+
+        def hold_turn():
+            with self.tbstate.turn_guard():
+                acquired.set()
+                release.wait(2)
+
+        worker = threading.Thread(target=hold_turn)
+        worker.start()
+        self.assertTrue(acquired.wait(2))
+        import thinking_book
+        started = time.monotonic()
+        thinking_book.cmd_advance(["--quiet"])
+        elapsed = time.monotonic() - started
+        release.set()
+        worker.join(timeout=2)
+
+        self.assertLess(elapsed, 0.5)
+        self.assertEqual(self.tbstate.read_pos(), 1)
 
     def test_stop_uses_word_count_when_status_line_is_off(self):
         long_line = " ".join("word" for _ in range(20))

@@ -18,7 +18,14 @@ fi
 TB_IN_STATUSLINE=1
 export TB_IN_STATUSLINE
 
-TB_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/thinking-book"
+if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    TB_CONFIG_DIR=$CLAUDE_CONFIG_DIR
+elif [ -n "${HOME:-}" ]; then
+    TB_CONFIG_DIR=$HOME/.claude
+else
+    exit 0
+fi
+TB_DIR="$TB_CONFIG_DIR/thinking-book"
 TB_SESSION_ID=${CLAUDE_CODE_SESSION_ID:-global}
 case "$TB_SESSION_ID" in
     ''|*[!A-Za-z0-9_-]*) TB_SESSION_ID=global ;;
@@ -45,40 +52,64 @@ emit_wrapped() {
 }
 
 # Without state there is nothing to read, but a wrapped status line must still render.
-if [ ! -f "$TB_DIR/hot.env" ]; then
+if [ ! -f "$TB_DIR/status.control" ]; then
     emit_wrapped
     exit 0
 fi
 
-TB_MODE=timer
-TB_DWELL=8
-TB_WPM=0
-TB_PAUSED=0
-TB_STATUSLINE=1
-TB_PREFIX=''
-TB_HUD=0
-# shellcheck disable=SC1090
-. "$TB_DIR/hot.env" 2>/dev/null || true
+# This record is data, never shell code: version mode dwell wpm paused statusline hud.
+# Read a second line too, so appended shell syntax cannot hide behind a valid first line.
+TB_VERSION=''
+TB_MODE=''
+TB_DWELL=''
+TB_WPM=''
+TB_PAUSED=''
+TB_STATUSLINE=''
+TB_HUD=''
+TB_EXTRA=''
+TB_TRAILING=''
+CONTROL_OK=1
+{
+    IFS=' ' read -r TB_VERSION TB_MODE TB_DWELL TB_WPM TB_PAUSED \
+        TB_STATUSLINE TB_HUD TB_EXTRA || CONTROL_OK=0
+    if IFS= read -r TB_TRAILING; then
+        CONTROL_OK=0
+    elif [ -n "$TB_TRAILING" ]; then
+        CONTROL_OK=0
+    fi
+} 2>/dev/null < "$TB_DIR/status.control" || CONTROL_OK=0
 
-WPM_OK=0
-case "$TB_WPM" in
-    ''|0*|*[!0-9]*) TB_WPM=0 ;;
-    *)
-        if [ "${#TB_WPM}" -le 4 ] && [ "$TB_WPM" -le 1000 ]; then
-            WPM_OK=1
-        else
-            TB_WPM=0
-        fi
-        ;;
-esac
+[ "$TB_VERSION" = "1" ] || CONTROL_OK=0
+[ -z "$TB_EXTRA" ] || CONTROL_OK=0
+case "$TB_MODE" in timer|turn|manual) ;; *) CONTROL_OK=0 ;; esac
 case "$TB_DWELL" in
-    ''|0*|*[!0-9]*) TB_DWELL=8 ;;
+    ''|0*|*[!0-9]*) CONTROL_OK=0 ;;
     *)
         if [ "${#TB_DWELL}" -gt 5 ] || [ "$TB_DWELL" -gt 86400 ]; then
-            TB_DWELL=8
+            CONTROL_OK=0
         fi
         ;;
 esac
+WPM_OK=0
+case "$TB_WPM" in
+    0) ;;
+    ''|0*|*[!0-9]*) CONTROL_OK=0 ;;
+    *)
+        if [ "${#TB_WPM}" -le 4 ] && [ "$TB_WPM" -ge 30 ] &&
+                [ "$TB_WPM" -le 1000 ]; then
+            WPM_OK=1
+        else
+            CONTROL_OK=0
+        fi
+        ;;
+esac
+case "$TB_PAUSED" in 0|1) ;; *) CONTROL_OK=0 ;; esac
+case "$TB_STATUSLINE" in 0|1) ;; *) CONTROL_OK=0 ;; esac
+case "$TB_HUD" in 0|1) ;; *) CONTROL_OK=0 ;; esac
+if [ "$CONTROL_OK" != "1" ]; then
+    emit_wrapped
+    exit 0
+fi
 
 # Presence means this surface has actually run in the current Claude Code session. The
 # SessionStart hook removes it. A statusLine settings entry alone is not proof of life:
@@ -96,7 +127,8 @@ read_int() {
         value=''
     fi
     case "$value" in
-        ''|*[!0-9]*) value=$3 ;;
+        0) ;;
+        ''|0*|*[!0-9]*) value=$3 ;;
     esac
     [ "${#value}" -gt 12 ] && value=$3
     # `value` is digits or a trusted numeric default, so this assignment cannot inject
@@ -119,6 +151,64 @@ else
     STREAM_DIR=''
     COUNT=0
 fi
+
+# Timer commits and Python stream publication share one global POSIX lock.
+# mkdir/rm only run when a page is actually due, never on the steady-state hot path.
+TURN_LOCK=''
+TURN_HELD=0
+release_turn_lock() {
+    [ "$TURN_HELD" = "1" ] || return 0
+    rm -f "$TURN_LOCK/owner" 2>/dev/null || :
+    rmdir "$TURN_LOCK" 2>/dev/null || :
+    TURN_HELD=0
+}
+acquire_turn_lock() {
+    [ -n "$STREAM_DIR" ] || return 1
+    TURN_LOCK="$TB_DIR/turn.lock.d"
+    if ! mkdir "$TURN_LOCK" 2>/dev/null; then
+        return 1
+    fi
+    if ! printf '%s\n' "$$" > "$TURN_LOCK/owner" 2>/dev/null; then
+        rm -f "$TURN_LOCK/owner" 2>/dev/null || :
+        rmdir "$TURN_LOCK" 2>/dev/null || :
+        return 1
+    fi
+    TURN_HELD=1
+    trap 'release_turn_lock' 0
+    trap 'release_turn_lock; exit 0' 1 2 3 15
+    GEN_LOCKED=''
+    IFS= read -r GEN_LOCKED 2>/dev/null < "$TB_DIR/stream.gen" || GEN_LOCKED=''
+    LOCK_VERSION=''
+    LOCK_MODE=''
+    LOCK_DWELL=''
+    LOCK_WPM=''
+    LOCK_PAUSED=''
+    LOCK_STATUSLINE=''
+    LOCK_HUD=''
+    LOCK_EXTRA=''
+    LOCK_TRAILING=''
+    LOCK_CONTROL_OK=1
+    {
+        IFS=' ' read -r LOCK_VERSION LOCK_MODE LOCK_DWELL LOCK_WPM LOCK_PAUSED \
+            LOCK_STATUSLINE LOCK_HUD LOCK_EXTRA || LOCK_CONTROL_OK=0
+        if IFS= read -r LOCK_TRAILING; then
+            LOCK_CONTROL_OK=0
+        elif [ -n "$LOCK_TRAILING" ]; then
+            LOCK_CONTROL_OK=0
+        fi
+    } 2>/dev/null < "$TB_DIR/status.control" || LOCK_CONTROL_OK=0
+    if [ "$GEN_LOCKED" != "$GEN" ] || [ "$LOCK_CONTROL_OK" != "1" ] ||
+            [ -n "$LOCK_EXTRA" ] || [ "$LOCK_VERSION" != "$TB_VERSION" ] ||
+            [ "$LOCK_MODE" != "$TB_MODE" ] || [ "$LOCK_DWELL" != "$TB_DWELL" ] ||
+            [ "$LOCK_WPM" != "$TB_WPM" ] || [ "$LOCK_PAUSED" != "$TB_PAUSED" ] ||
+            [ "$LOCK_STATUSLINE" != "$TB_STATUSLINE" ] ||
+            [ "$LOCK_HUD" != "$TB_HUD" ]; then
+        release_turn_lock
+        trap - 0 1 2 3 15
+        return 1
+    fi
+    return 0
+}
 
 [ "$POS" -lt 1 ] && POS=1
 
@@ -167,26 +257,82 @@ if [ "$TB_STATUSLINE" = "1" ] && [ "$TB_PAUSED" = "0" ] && [ "$TB_MODE" = "timer
         [ "$INTERVAL" -gt 30 ] && INTERVAL=30
     fi
     NOW=$(date +%s 2>/dev/null || echo 0)
+    case "$NOW" in
+        0) ;;
+        ''|0*|*[!0-9]*) NOW=0 ;;
+    esac
+    [ "${#NOW}" -gt 12 ] && NOW=0
+    COMMIT_CLOCK=$NOW
+    [ "$NOW" -gt 0 ] && COMMIT_CLOCK=$((NOW + 1))
     if [ "$LAST" -eq 0 ]; then
         # Cold start: no clock yet. Show this line and start the timer, rather than
         # treating the page as infinitely overdue and skipping the opening line.
-        printf '%s\n' "$NOW" > "$TB_DIR/last.tmp.$$" 2>/dev/null &&
-            mv "$TB_DIR/last.tmp.$$" "$TB_DIR/last" 2>/dev/null
+        if acquire_turn_lock; then
+            read_int POS_NOW "$TB_DIR/pos" 1
+            read_int LAST_NOW "$TB_DIR/last" 0
+            if [ "$POS_NOW" -eq "$POS" ] && [ "$LAST_NOW" -eq "$LAST" ]; then
+                printf '%s\n' "$COMMIT_CLOCK" > "$TB_DIR/last.tmp.$$" 2>/dev/null &&
+                    mv "$TB_DIR/last.tmp.$$" "$TB_DIR/last" 2>/dev/null
+            fi
+            release_turn_lock
+            trap - 0 1 2 3 15
+        fi
     elif [ "$NOW" -gt 0 ] && [ $((NOW - LAST)) -ge "$INTERVAL" ]; then
         if [ "$POS" -lt "$COUNT" ]; then
             # A Python rebuild can atomically switch generations while this shell is
-            # running. Never write an old numeric cursor into the new book layout.
-            GEN_NOW=''
-            IFS= read -r GEN_NOW 2>/dev/null < "$TB_DIR/stream.gen" || GEN_NOW=''
-            if [ "$GEN_NOW" = "$GEN" ]; then
-                POS=$((POS + 1))
-                printf '%s\n' "$POS" > "$TB_DIR/pos.tmp.$$" 2>/dev/null &&
-                    mv "$TB_DIR/pos.tmp.$$" "$TB_DIR/pos" 2>/dev/null
-                : > "$TB_DIR/finished" 2>/dev/null || true
-                load_line
+            # running. Recheck the full clock/cursor snapshot, then publish the clock
+            # first: concurrent renders may repeat the same write, but never turn twice.
+            if acquire_turn_lock; then
+                GEN_NOW=''
+                IFS= read -r GEN_NOW 2>/dev/null < "$TB_DIR/stream.gen" || GEN_NOW=''
+                read_int POS_NOW "$TB_DIR/pos" 1
+                read_int LAST_NOW "$TB_DIR/last" 0
+            else
+                GEN_NOW=''
+                POS_NOW=0
+                LAST_NOW=0
             fi
-            printf '%s\n' "$NOW" > "$TB_DIR/last.tmp.$$" 2>/dev/null &&
-                mv "$TB_DIR/last.tmp.$$" "$TB_DIR/last" 2>/dev/null
+            if [ "$TURN_HELD" = "1" ] && [ "$GEN_NOW" = "$GEN" ] &&
+                    [ "$POS_NOW" -eq "$POS" ] &&
+                    [ "$LAST_NOW" -eq "$LAST" ] &&
+                    printf '%s\n' "$COMMIT_CLOCK" > "$TB_DIR/last.tmp.$$" 2>/dev/null &&
+                    mv "$TB_DIR/last.tmp.$$" "$TB_DIR/last" 2>/dev/null; then
+                TURN_FROM=$POS
+                POS=$((POS + 1))
+                if printf '%s\n' "$POS" > "$TB_DIR/pos.tmp.$$" 2>/dev/null &&
+                        mv "$TB_DIR/pos.tmp.$$" "$TB_DIR/pos" 2>/dev/null; then
+                    PROGRESS_START=$TURN_FROM
+                    PROGRESS_GEN=''
+                    PROGRESS_OLD_START=''
+                    PROGRESS_OLD_END=''
+                    PROGRESS_EXTRA=''
+                    IFS=' ' read -r PROGRESS_GEN PROGRESS_OLD_START PROGRESS_OLD_END \
+                        PROGRESS_EXTRA 2>/dev/null < "$TB_DIR/statusline.progress" || :
+                    PROGRESS_NUMERIC=1
+                    case "$PROGRESS_OLD_START" in
+                        ''|0*|*[!0-9]*) PROGRESS_NUMERIC=0 ;;
+                    esac
+                    case "$PROGRESS_OLD_END" in
+                        ''|0*|*[!0-9]*) PROGRESS_NUMERIC=0 ;;
+                    esac
+                    if [ "$PROGRESS_NUMERIC" = "1" ] && [ -z "$PROGRESS_EXTRA" ] &&
+                            [ "$PROGRESS_GEN" = "$GEN" ] &&
+                            [ "${#PROGRESS_OLD_START}" -le 12 ] &&
+                            [ "${#PROGRESS_OLD_END}" -le 12 ] &&
+                            [ "$PROGRESS_OLD_END" -eq "$TURN_FROM" ] &&
+                            [ "$PROGRESS_OLD_START" -le "$PROGRESS_OLD_END" ]; then
+                        PROGRESS_START=$PROGRESS_OLD_START
+                    fi
+                    printf '%s %s %s\n' "$GEN" "$PROGRESS_START" "$POS" \
+                        > "$TB_DIR/statusline.progress.tmp.$$" 2>/dev/null &&
+                        mv "$TB_DIR/statusline.progress.tmp.$$" \
+                            "$TB_DIR/statusline.progress" 2>/dev/null
+                    : > "$TB_DIR/finished" 2>/dev/null || true
+                    load_line
+                fi
+            fi
+            release_turn_lock
+            trap - 0 1 2 3 15
         elif [ -n "$GEN" ]; then
             printf '%s\n' "$GEN" > "$TB_DIR/finished.tmp.$$" 2>/dev/null &&
                 mv "$TB_DIR/finished.tmp.$$" "$TB_DIR/finished" 2>/dev/null &&
@@ -236,13 +382,20 @@ if [ -n "$HUD" ]; then
     printf '%s\n' "$HUD"
 fi
 if [ -n "$LINE" ]; then
+    TB_PREFIX=''
+    if [ -f "$TB_DIR/status.prefix" ]; then
+        { IFS= read -r TB_PREFIX || :; } 2>/dev/null < "$TB_DIR/status.prefix" ||
+            TB_PREFIX=''
+    fi
+    [ "${#TB_PREFIX}" -gt 256 ] && TB_PREFIX=''
     BOOK_LINE="📖 ${TB_PREFIX}${LINE}"
     # Claude reserves a few columns around the status line. Keep a readable 100-column
     # ceiling, honour narrower exported terminal widths, and preserve every word by
     # wrapping only the uncommon over-long fragment. Short lines spawn no extra process.
     DISPLAY_WIDTH=${COLUMNS:-108}
     case "$DISPLAY_WIDTH" in
-        ''|*[!0-9]*) DISPLAY_WIDTH=108 ;;
+        0) ;;
+        ''|0*|*[!0-9]*) DISPLAY_WIDTH=108 ;;
     esac
     [ "${#DISPLAY_WIDTH}" -gt 4 ] && DISPLAY_WIDTH=108
     if [ "$DISPLAY_WIDTH" -gt 108 ]; then
