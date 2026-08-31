@@ -62,6 +62,7 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 |---|---|
 | `/thinking-book:n` | Turn the page — advance one line |
 | `/thinking-book:b` | Back one line |
+| `/thinking-book:book recap [n]` | Show the recent passages ending at your current line |
 | `/thinking-book:setup <book>` | Reset reading to HUD, spinner, and 250 WPM defaults |
 | `/thinking-book:book` | Compact reading dashboard and controls |
 | `/thinking-book:book status` | Dashboard plus display details and the whole queue |
@@ -126,10 +127,17 @@ book reader
 ```
 
 Run it in a split and you get the one-keypress page turn that is impossible inside Claude
-Code itself: **space** or `n` advances, `b` goes back, arrow keys work too, `r` redraws, `q` quits. It shows the line and
-your position, updates when something else moves the bookmark (timer mode or `book next`), and
-writes through to the same position file — so the spinner in the Claude pane follows along on
-its next turn. One bookmark, several windows.
+Code itself. It fills the pane with nearby context, marks the current passage with `📖`,
+and reports progress within the current book rather than across the whole library.
+
+- **space**, `n`, or → advances; `b` or ← goes back
+- `p` pauses or resumes automatic pacing; `+` and `-` adjust WPM
+- `r` redraws; `q` quits
+
+Resizing redraws immediately, rapid keys are retained, and the alternate screen preserves
+your shell history when the reader exits. It shares the same bookmark as the status line.
+For a quick noninteractive reminder, `book recap` prints the five passages ending at the
+current line; `book recap 12` chooses another bounded count.
 
 Pair it with `/thinking-book:book mode manual`, or lines will keep advancing underneath you.
 

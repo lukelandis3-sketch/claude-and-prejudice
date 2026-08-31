@@ -125,6 +125,20 @@ class StreamTest(IsolatedStateCase):
             with self.subTest(position=position):
                 self.assertEqual(self.tbstate.stream_line(position), lines[position - 1])
 
+    def test_stream_window_reads_only_the_requested_rows_across_shards(self):
+        lines = ["line-%d" % n for n in range(1, 515)]
+        self.seed_stream(lines, mode="manual")
+        self.assertEqual(
+            self.tbstate.stream_window(255, 258),
+            ["line-255", "line-256", "line-257", "line-258"],
+        )
+
+    def test_stream_window_clamps_to_the_book_stream(self):
+        self.seed_stream(["one", "two", "three"], mode="manual")
+        self.assertEqual(self.tbstate.stream_window(-20, 2), ["one", "two"])
+        self.assertEqual(self.tbstate.stream_window(3, 99), ["three"])
+        self.assertEqual(self.tbstate.stream_window(4, 2), [])
+
     def test_locate_and_resolve_use_item_relative_offsets(self):
         self.tbstate.save_item("a", {"title": "A", "kind": "book"}, ["a1", "a2"])
         self.tbstate.save_item("b", {"title": "B", "kind": "book"}, ["b1", "b2", "b3"])

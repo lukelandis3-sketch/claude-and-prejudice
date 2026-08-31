@@ -8,6 +8,7 @@ from pathlib import Path
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 
 import support
 from support import IsolatedStateCase, make_epub
@@ -642,6 +643,59 @@ class RoundTripTest(IsolatedStateCase):
         self.tbstate.write_pos(1)
         beginning = self.run_cli("back")
         self.assertIn("Beginning of Alpha", beginning.stdout)
+
+    def test_recap_prints_bounded_recent_context_ending_at_the_current_line(self):
+        self.seed_stream(["one", "two", "three", "four", "five", "six"], mode="manual")
+        self.tbstate.write_pos(5)
+
+        result = self.run_cli("recap", "3")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["  three", "  four", "📖 five"])
+
+    def test_recap_does_not_blend_the_previous_book_into_the_current_one(self):
+        self.tbstate.save_item("a", {"title": "Alpha"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "Beta"}, ["b1", "b2"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        self.tbstate.write_pos(3)
+
+        result = self.run_cli("recap", "5")
+
+        self.assertEqual(result.stdout.splitlines(), ["📖 b1"])
+
+    def test_reader_snapshot_uses_book_relative_progress_and_context(self):
+        import thinking_book
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item(
+            "b", {"title": "Beta", "kind": "book"}, ["b1", "b2", "b3"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        self.tbstate.write_pos(4)
+
+        context, title, offset, total, _pace = thinking_book._reader_snapshot({})
+
+        self.assertEqual((title, offset, total), ("Beta", 2, 3))
+        self.assertEqual(context, [("b1", False), ("b2", True), ("b3", False)])
+
+    def test_reader_pause_and_pace_controls_update_shared_reading_state(self):
+        import reader
+        import thinking_book
+        self.seed_stream(["one", "two"], mode="timer", wpm=250)
+
+        def exercise(_state, _next, _back, pause, faster, slower):
+            pause()
+            self.assertTrue(self.tbstate.load_config()["paused"])
+            faster()
+            config = self.tbstate.load_config()
+            self.assertEqual((config["mode"], config["words_per_minute"], config["paused"]),
+                             ("timer", 275, False))
+            slower()
+            self.assertEqual(self.tbstate.load_config()["words_per_minute"], 250)
+            return 0
+
+        with mock.patch.object(reader, "run", side_effect=exercise):
+            self.assertEqual(thinking_book.cmd_reader([]), 0)
 
     def test_invalid_page_counts_do_not_move_the_bookmark(self):
         self.run_cli("load", self.book)

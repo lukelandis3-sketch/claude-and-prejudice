@@ -1197,22 +1197,94 @@ def cmd_line(_args):
         print(line)
 
 
+def cmd_recap(args):
+    """Print recent context ending at the current passage."""
+    count = 5 if not args else _integer_arg(
+        args, "usage: %s" % book_command("recap [1-50]"), 1, 50)
+    position = tbstate.read_pos()
+    rows = tbstate.load_index()
+    current = tbstate.item_at(position, rows=rows)
+    bounds = tbstate.item_bounds(current[1], rows=rows) if current else None
+    first = bounds[0] if bounds else 1
+    passages = tbstate.stream_window(max(first, position - count + 1), position)
+    if not passages:
+        print("Nothing queued — try %s." % book_command("<title|url|file>"))
+        return
+    for offset, passage in enumerate(passages):
+        marker = "📖 " if offset == len(passages) - 1 else "  "
+        print(marker + passage)
+
+
+def _reader_snapshot(cache, context_radius=40):
+    """Reader-pane state with per-book progress and a bounded context window."""
+    generation = tbstate.stream_generation()
+    if cache.get("generation") != generation:
+        cache.clear()
+        cache.update({
+            "generation": generation,
+            "rows": tbstate.load_index(),
+            "total": tbstate.stream_count(),
+        })
+    rows, total = cache["rows"], cache["total"]
+    position = max(1, min(tbstate.read_pos(), total if total else 1))
+    current = tbstate.item_at(position, rows=rows)
+    if not current:
+        return ([], None, 1, 0, _pace_label(tbstate.load_config()))
+    bounds = tbstate.item_bounds(current[1], rows=rows, total=total)
+    start, end = bounds
+    window_start = max(start, position - context_radius)
+    window_end = min(end, position + context_radius)
+    passages = tbstate.stream_window(window_start, window_end)
+    context = [
+        (passage, window_start + offset == position)
+        for offset, passage in enumerate(passages)
+    ]
+    config = tbstate.load_config()
+    pace = _pace_label(config) + (" · paused" if config["paused"] else "")
+    return (
+        context, _display_title(current[1], current[3]),
+        position - start + 1, end - start + 1, pace,
+    )
+
+
 def cmd_reader(_args):
     """A companion pane where one keypress turns the page, outside the conversation."""
     import reader
 
+    if not tbstate.stream_count():
+        print("No book yet. Start: book <title|url|file>")
+        return 1
+
+    cache = {}
+
     def state():
-        config = tbstate.load_config()
-        position, total = tbstate.read_pos(), tbstate.stream_count()
-        current = tbstate.item_at(position)
-        title = _display_title(current[1], current[3]) if current else None
-        return (current_line(), title, position, total, _pace_label(config))
+        return _reader_snapshot(cache)
 
     def advance(step):
         advance_by(step)
         sync_spinner()
 
-    return reader.run(state, lambda: advance(1), lambda: advance(-1))
+    def pause():
+        config = tbstate.update_config(
+            lambda live: live.update({"paused": not live["paused"]}))
+        if not config["paused"]:
+            tbstate.write_last_advance()
+        sync_spinner(config)
+
+    def pace(delta):
+        def mutate(config):
+            current = config.get("words_per_minute") or 250
+            config.update({
+                "mode": "timer", "paused": False,
+                "words_per_minute": max(30, min(1000, current + delta)),
+            })
+        config = tbstate.update_config(mutate)
+        tbstate.write_last_advance()
+        sync_spinner(config)
+
+    return reader.run(
+        state, lambda: advance(1), lambda: advance(-1), pause,
+        lambda: pace(25), lambda: pace(-25))
 
 
 def _is_stale_plugin_launcher(link):
@@ -1287,12 +1359,12 @@ def cmd_version(_args):
 
 
 def print_help():
-    print("Read: %s · next|back [n] · pause|resume · status"
+    print("Read: %s · next|back [n] · recap [n] · pause|resume · status"
           % book_command("<title|url|file>"))
     print("Pace: pace <wpm> · mode timer|turn|manual · dwell <seconds>")
     print("Display: display hud|line|spinner|off · surfaces: on|off")
     print("Library: queue · open <number|title> · add <title|url|file>")
-    print("More: feed · reader · install-cli · repair · version")
+    print("More: reader · feed · install-cli · repair · version")
 
 
 def cmd_help(_args):
@@ -1441,7 +1513,8 @@ COMMANDS = {
     "clippings": cmd_clippings, "readwise": cmd_readwise, "read": cmd_read,
     "feed": cmd_feed, "queue": cmd_queue, "open": cmd_open, "status": cmd_status, "mode": cmd_mode,
     "pace": cmd_pace, "dwell": cmd_dwell, "pause": cmd_pause, "resume": cmd_resume, "pane": cmd_pane,
-    "on": cmd_on, "off": cmd_off, "next": cmd_next, "back": cmd_back, "line": cmd_line,
+    "on": cmd_on, "off": cmd_off, "next": cmd_next, "back": cmd_back,
+    "line": cmd_line, "recap": cmd_recap,
     "repair": cmd_repair, "refresh": cmd_refresh, "hud": cmd_hud, "display": cmd_display,
     "version": cmd_version, "help": cmd_help,
     "reader": cmd_reader, "install-cli": cmd_install_cli,

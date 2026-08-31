@@ -329,6 +329,48 @@ def stream_line(index):
     return stream_record(index)[1]
 
 
+def stream_window(start, end):
+    """Return a bounded inclusive prose window without scanning the whole stream."""
+    total = stream_count()
+    start = max(1, int(start))
+    end = min(total, int(end))
+    if end < start:
+        return []
+
+    generation = stream_generation()
+    if not generation:
+        rows = []
+        try:
+            with open(stream_path(), encoding="utf-8") as fh:
+                for number, line in enumerate(fh, 1):
+                    if number > end:
+                        break
+                    if number >= start:
+                        rows.append(_decode_stream_record(line.rstrip("\n"))[1])
+        except OSError:
+            return []
+        return rows
+
+    directory = stream_generation_dir(generation)
+    rows = []
+    first_shard = (start - 1) // STREAM_SHARD_LINES
+    last_shard = (end - 1) // STREAM_SHARD_LINES
+    for shard in range(first_shard, last_shard + 1):
+        shard_start = shard * STREAM_SHARD_LINES + 1
+        target = os.path.join(directory, "%d.txt" % shard)
+        try:
+            with open(target, encoding="utf-8") as fh:
+                for offset, line in enumerate(fh):
+                    position = shard_start + offset
+                    if position > end:
+                        break
+                    if position >= start:
+                        rows.append(_decode_stream_record(line.rstrip("\n"))[1])
+        except OSError:
+            return []
+    return rows
+
+
 def load_queue():
     queue = read_json(path("queue.json"), {"items": []})
     items = queue.get("items")
