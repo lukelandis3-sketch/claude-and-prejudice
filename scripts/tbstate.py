@@ -246,6 +246,26 @@ def read_pos():
 
 def write_pos(index):
     atomic_write(path("pos"), "%d\n" % max(1, int(index)))
+    clear_finished()
+
+
+def clear_finished():
+    try:
+        os.unlink(path("finished"))
+    except OSError:
+        pass
+
+
+def mark_finished():
+    """Mark the current immutable stream complete after its final passage was read."""
+    generation = stream_generation()
+    if generation and _read(path("finished"), "").strip() != generation:
+        atomic_write(path("finished"), generation + "\n")
+
+
+def is_finished():
+    generation = stream_generation()
+    return bool(generation and _read(path("finished"), "").strip() == generation)
 
 
 def read_last_advance():

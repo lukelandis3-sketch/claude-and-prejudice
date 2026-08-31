@@ -336,6 +336,25 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("a book", result.stdout)
 
+    def test_add_routes_project_gutenberg_book_urls_to_the_book_importer(self):
+        import thinking_book
+        calls = []
+        original_book = thinking_book.cmd_gutenberg
+        original_article = thinking_book.cmd_read
+        thinking_book.cmd_gutenberg = lambda args, activate=True: (
+            calls.append(("book", args, activate)) or ["gutenberg-2701"])
+        thinking_book.cmd_read = lambda args, activate=True: (
+            calls.append(("article", args, activate)) or ["article"])
+        try:
+            thinking_book.cmd_add(
+                ["https://www.gutenberg.org/cache/epub/2701/pg2701.txt"],
+                activate=False,
+            )
+        finally:
+            thinking_book.cmd_gutenberg = original_book
+            thinking_book.cmd_read = original_article
+        self.assertEqual(calls, [("book", ["2701"], False)])
+
     def test_add_rejects_a_directory_with_a_useful_error(self):
         result = self.run_cli("add", self.config_dir)
         self.assertEqual(result.returncode, 1)
@@ -737,7 +756,7 @@ class RoundTripTest(IsolatedStateCase):
         self.tbstate.rebuild_stream()
         dashboard = self.run_cli("")
         self.assertIn("unavailable", dashboard.stdout)
-        self.assertIn("/thinking-book:book queue", dashboard.stdout)
+        self.assertIn("/thinking-book:book library", dashboard.stdout)
         self.assertNotIn("No book is queued", dashboard.stdout)
 
     def test_hud_command_enables_and_disables_the_graphical_status(self):
@@ -1039,8 +1058,34 @@ class RoundTripTest(IsolatedStateCase):
 
         result = self.run_cli("queue")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("1.    Alpha [1/2] (book)", result.stdout)
-        self.assertIn("2. -> Beta [2/2] (article)", result.stdout)
+        self.assertIn("1.    Alpha — 1/2 (50%)", result.stdout)
+        self.assertIn("2. 📖 Beta — 2/2 (100%)", result.stdout)
+
+    def test_library_is_the_clear_alias_and_shows_reading_progress(self):
+        self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1", "a2"])
+        self.tbstate.save_item("b", {"title": "Beta", "kind": "article"}, ["b1", "b2"])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+        self.tbstate.write_pos(4)
+
+        result = self.run_cli("library")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("1.    Alpha — 1/2 (50%)", result.stdout)
+        self.assertIn("2. 📖 Beta — 2/2 (100%)", result.stdout)
+        self.assertIn("Open: /thinking-book:book open 1", result.stdout)
+        self.assertNotIn("(article)", result.stdout)
+
+    def test_library_accepts_remove_as_a_plain_english_alias(self):
+        for item in ("a", "b"):
+            self.tbstate.save_item(item, {"title": item.upper(), "kind": "book"}, [item])
+        self.tbstate.save_queue({"items": ["a", "b"]})
+        self.tbstate.rebuild_stream()
+
+        result = self.run_cli("library", "remove", "2")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.tbstate.load_queue()["items"], ["a"])
 
     def test_open_accepts_the_number_shown_by_queue(self):
         self.tbstate.save_item("a", {"title": "Alpha", "kind": "book"}, ["a1"])
@@ -1052,6 +1097,45 @@ class RoundTripTest(IsolatedStateCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Opened Beta", result.stdout)
         self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "b1")
+
+    def test_plugin_open_points_to_the_persistent_reader_not_transcript_prose(self):
+        self.seed_stream(["private current prose", "second"], mode="manual")
+
+        result = self.run_cli("open", "1")
+
+        self.assertIn("Opened Test Item · 1/2 (50%)", result.stdout)
+        self.assertIn("Read at 📖 below the input box", result.stdout)
+        self.assertNotIn("private current prose", result.stdout)
+
+    def test_plugin_open_keeps_prose_when_only_the_live_spinner_is_available(self):
+        self.seed_stream(["spinner prose", "second"], mode="manual")
+        config = self.tbstate.load_config()
+        config["surfaces"] = {"statusline": False, "spinner": True}
+        self.tbstate.save_config(config)
+
+        result = self.run_cli("open", "1")
+
+        self.assertIn("spinner prose", result.stdout)
+        self.assertIn("live spinner", result.stdout)
+
+    def test_plugin_open_explains_how_to_resume_when_display_is_off(self):
+        self.seed_stream(["hidden prose"], mode="manual")
+        config = self.tbstate.load_config()
+        config["surfaces"] = {"statusline": False, "spinner": False}
+        self.tbstate.save_config(config)
+
+        result = self.run_cli("open", "1")
+
+        self.assertNotIn("hidden prose", result.stdout)
+        self.assertIn("Reading is off", result.stdout)
+        self.assertIn("/thinking-book:book on", result.stdout)
+
+    def test_local_open_still_prints_prose_for_terminal_workflows(self):
+        self.seed_stream(["useful terminal prose", "second"], mode="manual")
+
+        result = self.run_cli("open", "1", env={"THINKING_BOOK_COMMAND": "book"})
+
+        self.assertIn("useful terminal prose", result.stdout)
 
     def test_displayed_number_wins_over_another_books_numeric_title(self):
         for item, title in (("a", "Alpha"), ("b", "Beta"), ("c", "2")):
@@ -1106,7 +1190,7 @@ class RoundTripTest(IsolatedStateCase):
 
         missing = self.run_cli("queue", "rm", "Nobody")
         self.assertEqual(missing.returncode, 1)
-        self.assertIn("no queued item matches", missing.stderr)
+        self.assertIn("no library item matches", missing.stderr)
         self.assertEqual(self.tbstate.load_queue()["items"], ["a"])
 
     def test_blank_title_uses_the_item_id_in_queue_and_remove_confirmation(self):
@@ -1118,7 +1202,7 @@ class RoundTripTest(IsolatedStateCase):
         removed = self.run_cli("queue", "rm", "1")
         self.assertEqual(removed.returncode, 0, removed.stderr)
         self.assertIn("Removed untitled", removed.stdout)
-        self.assertIn("Queue is empty", removed.stdout)
+        self.assertIn("Library is empty", removed.stdout)
 
     def test_blank_title_from_an_old_stream_index_is_repaired_when_displayed(self):
         self.tbstate.save_item("untitled", {"title": "  ", "kind": "book"}, ["line"])
@@ -1190,11 +1274,14 @@ class RoundTripTest(IsolatedStateCase):
         self.tbstate.rebuild_stream()
         self.tbstate.write_pos(2)
 
-        self.assertIn("b1", self.run_cli("open", "Beta").stdout)
+        self.run_cli("open", "Beta")
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "b1")
         self.run_cli("next")
-        self.assertIn("a2", self.run_cli("open", "Alpha").stdout)
+        self.run_cli("open", "Alpha")
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "a2")
         reopened = self.run_cli("open", "Beta")
-        self.assertIn("b2", reopened.stdout)
+        self.assertIn("2/3", reopened.stdout)
+        self.assertEqual(self.tbstate.stream_line(self.tbstate.read_pos()), "b2")
         self.assertLess(abs(self.tbstate.read_last_advance() - time.time()), 3)
 
     def test_open_reports_ambiguous_titles(self):
@@ -1217,8 +1304,85 @@ class RoundTripTest(IsolatedStateCase):
         self.tbstate.write_json(self.tbstate.path("bookmarks.json"), {"a": 500})
         result = self.run_cli("open", "Sea")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("line 2", result.stdout)
+        self.assertIn("2/2", result.stdout)
         self.assertEqual(self.tbstate.load_bookmarks()["a"], 2)
+
+    def test_switching_to_timer_starts_a_fresh_interval(self):
+        self.seed_stream(["one", "two"], mode="manual", wpm=250)
+        self.tbstate.write_last_advance(time.time() - 1000)
+
+        self.run_cli("mode", "timer")
+
+        self.assertLess(abs(self.tbstate.read_last_advance() - time.time()), 3)
+        self.run_statusline()
+        self.assertEqual(self.tbstate.read_pos(), 1)
+
+    def test_changing_timer_pace_starts_a_fresh_interval(self):
+        self.seed_stream(["one", "two"], mode="timer", wpm=250)
+        self.tbstate.write_last_advance(time.time() - 1000)
+
+        self.run_cli("pace", "300")
+
+        self.run_statusline()
+        self.assertEqual(self.tbstate.read_pos(), 1)
+
+    def test_changing_fixed_dwell_starts_a_fresh_interval(self):
+        self.seed_stream(["one", "two"], mode="timer", wpm=None)
+        self.tbstate.write_last_advance(time.time() - 1000)
+
+        self.run_cli("dwell", "7")
+
+        self.run_statusline()
+        self.assertEqual(self.tbstate.read_pos(), 1)
+
+    def test_configuring_dwell_in_manual_mode_does_not_activate_timer(self):
+        self.seed_stream(["one"], mode="manual", wpm=250)
+        self.tbstate.write_last_advance(123)
+
+        result = self.run_cli("dwell", "7")
+
+        self.assertEqual(self.tbstate.load_config()["mode"], "manual")
+        self.assertEqual(self.tbstate.read_last_advance(), 123)
+        self.assertIn("Timer mode is off", result.stdout)
+
+    def test_configuring_pace_in_manual_mode_leaves_the_clock_alone(self):
+        self.seed_stream(["one"], mode="manual", wpm=250)
+        self.tbstate.write_last_advance(123)
+
+        result = self.run_cli("pace", "300")
+
+        self.assertEqual(self.tbstate.load_config()["mode"], "manual")
+        self.assertEqual(self.tbstate.read_last_advance(), 123)
+        self.assertIn("Timer mode is off", result.stdout)
+
+    def test_finished_turn_hooks_do_not_rewrite_completion_state(self):
+        self.seed_stream(["the end"], mode="turn")
+        self.tbstate.mark_finished()
+        finished = self.tbstate.path("finished")
+        before = os.stat(finished).st_ino
+
+        self.run_cli("advance", "--quiet")
+
+        self.assertTrue(self.tbstate.is_finished())
+        self.assertEqual(os.stat(finished).st_ino, before)
+
+    def test_dashboard_names_the_end_of_the_library_as_finished(self):
+        self.seed_stream(["one", "the end"], mode="timer", wpm=250)
+        self.tbstate.write_pos(2)
+        self.tbstate.mark_finished()
+
+        dashboard = self.run_cli("")
+
+        self.assertIn("finished", dashboard.stdout)
+
+    def test_explicit_next_marks_finished_and_back_clears_it(self):
+        self.seed_stream(["the end"], mode="manual")
+
+        self.run_cli("next")
+        self.assertTrue(self.tbstate.is_finished())
+
+        self.run_cli("back")
+        self.assertFalse(self.tbstate.is_finished())
 
     def test_import_after_off_stays_off(self):
         self.run_cli("load", self.book)

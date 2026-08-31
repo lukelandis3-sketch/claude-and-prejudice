@@ -124,6 +124,29 @@ class StatusLineTest(IsolatedStateCase):
         self.assertEqual(self.run_statusline().stdout.strip(), "📖 two")
         self.assertEqual(self.tbstate.read_pos(), 2)
 
+    def test_finished_timer_does_not_rewrite_its_clock_forever(self):
+        self.seed_stream(["one", "the end"], mode="timer", dwell=1)
+        self.tbstate.write_pos(2)
+        self.tbstate.write_last_advance(123)
+        before = os.stat(self.tbstate.path("last")).st_ino
+
+        self.run_statusline()
+
+        self.assertEqual(self.tbstate.read_last_advance(), 123)
+        self.assertEqual(os.stat(self.tbstate.path("last")).st_ino, before)
+
+    def test_fresh_final_passage_is_not_finished_before_its_interval(self):
+        self.seed_stream(["one", "the end"], mode="timer", wpm=250)
+        self.tbstate.write_pos(2)
+        self.tbstate.write_last_advance(time.time())
+        self._enable_hud()
+
+        first = self.run_statusline().stdout.splitlines()[0]
+
+        self.assertFalse(self.tbstate.is_finished())
+        self.assertIn("250 wpm", first)
+        self.assertNotIn("finished", first)
+
     def test_statusline_surface_off_prints_nothing(self):
         self.seed_stream(["one"], statusline=False)
         self.assertEqual(self.run_statusline().stdout.strip(), "")
@@ -189,6 +212,14 @@ class StatusLineTest(IsolatedStateCase):
         self.seed_stream(["one readable line"], mode="timer", wpm=220, paused=True)
         self._enable_hud()
         self.assertIn("220 wpm", self.run_statusline().stdout.splitlines()[0])
+
+    def test_hud_names_the_end_of_the_library_as_finished(self):
+        self.seed_stream(["one", "the end"], mode="timer", wpm=250)
+        self.tbstate.write_pos(2)
+        self._enable_hud()
+        self.tbstate.mark_finished()
+
+        self.assertIn("finished", self.run_statusline().stdout.splitlines()[0])
 
     def test_hud_missing_from_an_old_generation_falls_back_to_the_book_line(self):
         self.seed_stream(["one"], mode="manual")

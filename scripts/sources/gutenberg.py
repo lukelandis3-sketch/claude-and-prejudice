@@ -2,6 +2,7 @@
 
 import json
 import re
+import unicodedata
 import urllib.parse
 
 import fetch
@@ -26,6 +27,26 @@ PREFERRED_FORMATS = (
     "text/plain; charset=us-ascii",
     "text/plain",
 )
+
+
+def extract_id(argument):
+    """Return the numeric id from a public Gutenberg book URL, if it is one."""
+    try:
+        parsed = urllib.parse.urlsplit(str(argument).strip())
+    except ValueError:
+        return None
+    if parsed.scheme.casefold() not in ("http", "https"):
+        return None
+    host = (parsed.hostname or "").casefold().rstrip(".")
+    if host != "gutenberg.org" and not host.endswith(".gutenberg.org"):
+        return None
+    match = re.match(r"^/(?:ebooks|files|cache/epub)/(\d+)(?:[/.]|$)", parsed.path, re.I)
+    return match.group(1) if match else None
+
+
+def _title_key(value):
+    value = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return " ".join(re.sub(r"[^\w]+", " ", value).split())
 
 
 def _text_url(formats):
@@ -91,8 +112,9 @@ def strip_front_matter(text):
 def load(argument):
     """Accept a Gutenberg id or a free-text search string."""
     argument = str(argument).strip()
-    if argument.isdigit():
-        book = json.loads(fetch.get("%s/%s" % (API, argument), accept="application/json"))
+    book_id = argument if argument.isdigit() else extract_id(argument)
+    if book_id:
+        book = json.loads(fetch.get("%s/%s" % (API, book_id), accept="application/json"))
     else:
         payload = json.loads(
             fetch.get("%s?search=%s" % (API, urllib.parse.quote(argument)), accept="application/json")
@@ -100,7 +122,16 @@ def load(argument):
         results = payload.get("results") or []
         if not results:
             raise LookupError("no Project Gutenberg match for %r" % argument)
-        book = results[0]
+        readable = [
+            result for result in results if _text_url(result.get("formats") or {})
+        ]
+        if not readable:
+            raise LookupError("no plain-text format available for %r" % argument)
+        wanted = _title_key(argument)
+        book = next(
+            (result for result in readable if _title_key(result.get("title")) == wanted),
+            readable[0],
+        )
 
     url = _text_url(book.get("formats") or {})
     if not url:

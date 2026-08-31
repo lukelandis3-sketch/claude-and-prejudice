@@ -1,7 +1,7 @@
 {
   "name": "thinking-book",
   "description": "Read a book in the margins of Claude Code: replaces the thinking spinner text and status line with successive lines of whatever you're reading.",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "author": { "name": "lukelandis3-sketch" },
   "homepage": "https://github.com/lukelandis3-sketch/claude-and-prejudice",
   "keywords": ["reading", "books", "spinner", "statusline", "epub", "gutenberg"]

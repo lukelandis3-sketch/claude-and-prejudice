@@ -33,14 +33,16 @@ case "$TB_PAUSED$TB_STATUSLINE$TB_SPINNER" in
     *) run_python ;;
 esac
 [ -z "$TB_EXTRA" ] || run_python
+[ "$TB_PAUSED" = "0" ] && [ "$TB_MODE" = "turn" ] && run_python
 
 # A spinner can be skipped only when Python certified the exact immutable generation
 # and numeric position it rendered. A status-line page turn makes this cursor dirty.
 if [ "$TB_SPINNER" = "1" ]; then
     CUR_GEN=''
     CUR_POS=''
+    CUR_COUNT=''
     CUR_EXTRA=''
-    IFS=' ' read -r CUR_GEN CUR_POS CUR_EXTRA \
+    IFS=' ' read -r CUR_GEN CUR_POS CUR_COUNT CUR_EXTRA \
         2>/dev/null < "$TB_DIR/spinner.cursor" || run_python
     [ -z "$CUR_EXTRA" ] || run_python
     case "$CUR_GEN" in
@@ -50,18 +52,21 @@ if [ "$TB_SPINNER" = "1" ]; then
     [ "${#CUR_GEN}" -le 64 ] || run_python
     case "$CUR_POS" in ''|0*|*[!0-9]*) run_python ;; esac
     [ "${#CUR_POS}" -le 12 ] || run_python
+    case "$CUR_COUNT" in ''|*[!0-9]*) run_python ;; esac
+    [ "${#CUR_COUNT}" -le 12 ] || run_python
 
     GEN=''
     IFS= read -r GEN 2>/dev/null < "$TB_DIR/stream.gen" || GEN=''
     [ -n "$GEN" ] || GEN=none
     POS=''
     IFS= read -r POS 2>/dev/null < "$TB_DIR/pos" || POS=''
+    [ -n "$POS" ] || POS=1
     [ "$CUR_GEN" = "$GEN" ] && [ "$CUR_POS" = "$POS" ] || run_python
+    [ "$CUR_COUNT" = "0" ] && exit 0
 fi
 
 [ "$TB_PAUSED" = "1" ] && exit 0
 [ "$TB_MODE" = "manual" ] && exit 0
-[ "$TB_MODE" = "turn" ] && run_python
 
 # A live status line owns the timer clock. If it is absent, Python remains the fallback
 # clock so a newly installed pane still turns pages before Claude is restarted.

@@ -122,6 +122,13 @@ fi
 
 [ "$POS" -lt 1 ] && POS=1
 
+FINISHED=0
+if [ "$COUNT" -gt 0 ] && [ "$POS" -ge "$COUNT" ]; then
+    FINISHED_GEN=''
+    IFS= read -r FINISHED_GEN 2>/dev/null < "$TB_DIR/finished" || FINISHED_GEN=''
+    [ -n "$GEN" ] && [ "$FINISHED_GEN" = "$GEN" ] && FINISHED=1
+fi
+
 LINE=''
 WORDS=1
 SHARD=0
@@ -151,7 +158,8 @@ load_line() {
 
 # Timer mode: the page turns on the clock, one line per invocation at most, so walking
 # away for an hour costs one line rather than four hundred.
-if [ "$TB_STATUSLINE" = "1" ] && [ "$TB_PAUSED" = "0" ] && [ "$TB_MODE" = "timer" ] && [ "$COUNT" -gt 0 ]; then
+if [ "$TB_STATUSLINE" = "1" ] && [ "$TB_PAUSED" = "0" ] && [ "$TB_MODE" = "timer" ] &&
+        [ "$COUNT" -gt 0 ] && [ "$FINISHED" = "0" ]; then
     INTERVAL=$TB_DWELL
     if [ "$WPM_OK" = "1" ]; then
         INTERVAL=$(((WORDS * 60 + TB_WPM - 1) / TB_WPM))
@@ -174,11 +182,16 @@ if [ "$TB_STATUSLINE" = "1" ] && [ "$TB_PAUSED" = "0" ] && [ "$TB_MODE" = "timer
                 POS=$((POS + 1))
                 printf '%s\n' "$POS" > "$TB_DIR/pos.tmp.$$" 2>/dev/null &&
                     mv "$TB_DIR/pos.tmp.$$" "$TB_DIR/pos" 2>/dev/null
+                : > "$TB_DIR/finished" 2>/dev/null || true
                 load_line
             fi
+            printf '%s\n' "$NOW" > "$TB_DIR/last.tmp.$$" 2>/dev/null &&
+                mv "$TB_DIR/last.tmp.$$" "$TB_DIR/last" 2>/dev/null
+        elif [ -n "$GEN" ]; then
+            printf '%s\n' "$GEN" > "$TB_DIR/finished.tmp.$$" 2>/dev/null &&
+                mv "$TB_DIR/finished.tmp.$$" "$TB_DIR/finished" 2>/dev/null &&
+                FINISHED=1
         fi
-        printf '%s\n' "$NOW" > "$TB_DIR/last.tmp.$$" 2>/dev/null &&
-            mv "$TB_DIR/last.tmp.$$" "$TB_DIR/last" 2>/dev/null
     fi
 fi
 
@@ -195,7 +208,9 @@ if [ "$TB_STATUSLINE" = "1" ] && [ -n "$STREAM_DIR" ] && [ "$POS" -le "$COUNT" ]
                 "READ HERE · "*) HUD=${HUD#"READ HERE · "} ;;
                 "📖 "*) HUD=${HUD#"📖 "} ;;
             esac
-            if [ "$TB_MODE" = "timer" ]; then
+            if [ "$FINISHED" = "1" ]; then
+                HUD="$HUD · finished"
+            elif [ "$TB_MODE" = "timer" ]; then
                 if [ "$WPM_OK" = "1" ]; then
                     HUD="$HUD · ${TB_WPM} wpm"
                 else

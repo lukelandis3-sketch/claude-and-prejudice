@@ -110,7 +110,8 @@ class InstallCliTest(IsolatedStateCase):
     def test_warns_when_the_directory_is_not_on_path(self):
         target = os.path.join(self.config_dir, "offpath")
         result = self.run_cli("install-cli", target)
-        self.assertIn("not on your PATH", result.stdout)
+        self.assertIn(os.path.join(target, "book") + " next", result.stdout)
+        self.assertIn("add %s to PATH" % target, result.stdout)
 
     def test_says_how_to_use_it_when_the_directory_is_on_path(self):
         target = os.path.join(self.config_dir, "onpath")
@@ -120,7 +121,7 @@ class InstallCliTest(IsolatedStateCase):
         self.assertIn("another terminal", result.stdout)
         self.assertIn("book next", result.stdout)
         self.assertNotIn("tb n", result.stdout)
-        self.assertNotIn("not on your PATH", result.stdout)
+        self.assertNotIn("add %s to PATH" % target, result.stdout)
 
     def test_refuses_to_clobber_an_unrelated_file(self):
         target = os.path.join(self.config_dir, "occupied")

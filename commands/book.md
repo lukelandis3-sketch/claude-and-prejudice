@@ -1,6 +1,6 @@
 ---
 description: Read or manage books
-argument-hint: <title|url|file> | status | pause | queue | more...
+argument-hint: <title|url|file> | status | pause | library | more...
 allowed-tools: Bash(python3:*)
 disable-model-invocation: true
 ---

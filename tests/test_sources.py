@@ -66,6 +66,58 @@ class EpubTest(unittest.TestCase):
 
 
 class GutenbergTest(unittest.TestCase):
+    def test_extracts_ids_from_public_book_and_text_urls(self):
+        self.assertEqual(gutenberg.extract_id(
+            "https://www.gutenberg.org/ebooks/2701"), "2701")
+        self.assertEqual(gutenberg.extract_id(
+            "https://gutenberg.org/files/2701/2701-0.txt"), "2701")
+        self.assertEqual(gutenberg.extract_id(
+            "https://gutenberg.org/cache/epub/2701/pg2701.txt"), "2701")
+        self.assertIsNone(gutenberg.extract_id(
+            "https://gutenberg.org.evil.test/ebooks/2701"))
+
+    def test_search_prefers_an_exact_normalized_title_over_result_order(self):
+        payload = {"results": [
+            {
+                "id": 1, "title": "A Reader's Guide to Moby Dick", "authors": [],
+                "formats": {"text/plain": "https://texts.test/wrong.txt"},
+            },
+            {
+                "id": 2701, "title": "Moby-Dick", "authors": [{"name": "Melville"}],
+                "formats": {"text/plain": "https://texts.test/right.txt"},
+            },
+        ]}
+
+        with mock.patch.object(gutenberg.fetch, "get") as get:
+            get.side_effect = [json.dumps(payload), "Call me Ishmael."]
+            meta, text = gutenberg.load("Moby Dick")
+
+        self.assertEqual(meta["gutenberg_id"], 2701)
+        self.assertEqual(text, "Call me Ishmael.")
+        self.assertEqual(get.call_args_list[1].args[0], "https://texts.test/right.txt")
+
+    def test_exact_title_without_plain_text_does_not_hide_a_readable_result(self):
+        payload = {"results": [
+            {
+                "id": 1, "title": "Related readable result", "authors": [],
+                "formats": {"text/plain": "https://texts.test/readable.txt"},
+            },
+            {
+                "id": 2, "title": "Wanted", "authors": [],
+                "formats": {"application/epub+zip": "https://texts.test/wanted.epub"},
+            },
+        ]}
+
+        with mock.patch.object(gutenberg.fetch, "get") as get:
+            get.side_effect = [json.dumps(payload), "Readable prose."]
+            meta, _text = gutenberg.load("Wanted")
+
+        self.assertEqual(meta["gutenberg_id"], 1)
+
+    def test_search_page_is_not_mistaken_for_a_book_url(self):
+        self.assertIsNone(gutenberg.extract_id(
+            "https://www.gutenberg.org/ebooks/search/?query=moby"))
+
     def test_strips_licence_header_and_footer(self):
         raw = (
             "The Project Gutenberg eBook of Whatever\n"

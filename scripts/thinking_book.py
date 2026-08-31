@@ -82,6 +82,9 @@ def _mark_following_stop_consumed():
     """An explicit page command already used this response's turn-mode advance."""
     if not os.environ.get("CLAUDE_CODE_SESSION_ID"):
         return
+    config = tbstate.load_config()
+    if config["mode"] != "turn" or config["paused"]:
+        return
     tbstate.atomic_write(stop_suppression_path(), "1\n")
 
 
@@ -92,6 +95,13 @@ def _consume_stop_suppression():
         return True
     except OSError:
         return False
+
+
+def _clear_stop_suppression():
+    try:
+        os.unlink(stop_suppression_path())
+    except OSError:
+        pass
 
 
 def prune_statusline_markers(now=None):
@@ -134,16 +144,21 @@ def sync_spinner(config=None):
         # stayed stable while settings.json was updated.
         if ((tbstate.stream_generation() or "none") == generation
                 and tbstate.read_pos() == position):
-            tbstate.atomic_write(cursor, "%s %d\n" % (generation, position))
+            tbstate.atomic_write(cursor, "%s %d %d\n" % (
+                generation, position, tbstate.stream_count()))
     return line
 
 
 def advance_by(steps):
     """Move the bookmark, clamped to the stream. Returns the new position."""
     total = tbstate.stream_count()
-    position = tbstate.read_pos() + steps
-    position = max(1, min(position, total if total else 1))
-    tbstate.write_pos(position)
+    before = tbstate.read_pos()
+    requested = before + steps
+    position = max(1, min(requested, total if total else 1))
+    if position != before or (steps < 0 and tbstate.is_finished()):
+        tbstate.write_pos(position)
+    if total and steps > 0 and requested > total:
+        tbstate.mark_finished()
     tbstate.write_last_advance()
     return position
 
@@ -343,6 +358,10 @@ def cmd_add(args, activate=True):
         raise SystemExit("usage: %s" % book_command("add <title|url|file>"))
     target = " ".join(args).strip()
     if re.match(r"^https?://", target, re.I):
+        import gutenberg
+        gutenberg_id = gutenberg.extract_id(target)
+        if gutenberg_id:
+            return _run_import(cmd_gutenberg, [gutenberg_id], activate)
         return _run_import(cmd_read, [target], activate)
     if target.casefold().startswith("file://"):
         from urllib.parse import unquote, urlsplit
@@ -917,7 +936,7 @@ def _queue_entries(rows=None):
 
 
 def _resolve_queue_item(query, rows=None):
-    """Resolve a stable id, exact/partial title, or the number shown by `/book queue`."""
+    """Resolve a stable id, exact/partial title, or the number shown by the library."""
     query = query.strip()
     entries = _queue_entries(rows)
     folded = query.casefold()
@@ -929,8 +948,8 @@ def _resolve_queue_item(query, rows=None):
     if not matches:
         matches = [entry for entry in entries if folded in entry["title"].casefold()]
     if not matches:
-        raise SystemExit("no queued item matches %r; run %s for numbers and titles."
-                         % (query, book_command("queue")))
+        raise SystemExit("no library item matches %r; run %s for numbers and titles."
+                         % (query, book_command("library")))
     if len(matches) > 1:
         choices = ", ".join("%d: %s (%s)" % (
                             entry["number"], entry["title"], entry["id"])
@@ -971,9 +990,10 @@ def cmd_dashboard(args):
         print("thinking-book %s" % version())
     if not active:
         if unavailable:
-            print("%d queued item%s unavailable."
+            print("%d library item%s unavailable."
                   % (len(unavailable), " is" if len(unavailable) == 1 else "s are"))
-            print("Fix: %s · Help: %s" % (book_command("queue"), book_command("help")))
+            print("Fix: %s · Help: %s" % (
+                book_command("library"), book_command("help")))
             return
         print("No book yet.")
         print("Start: %s · Help: %s" % (
@@ -985,8 +1005,11 @@ def cmd_dashboard(args):
     heading = "Book: %s%s" % (active["title"], " — %s" % author if author else "")
     percent = (active["offset"] * 100) // max(1, active["length"])
     surfaces = config["surfaces"]
+    finished = active["number"] == len(entries) and tbstate.is_finished()
     if not (surfaces["statusline"] or surfaces["spinner"]):
         state = "off — %s" % book_command("on")
+    elif finished:
+        state = "finished"
     elif config["paused"]:
         state = "paused"
     elif not surfaces["statusline"]:
@@ -1012,8 +1035,8 @@ def cmd_dashboard(args):
         controls += " · Resume: %s" % book_command("resume")
     else:
         controls += " · Pause: %s" % book_command("pause")
-    print("%s · Queue: %s · Help: %s" % (
-        controls, book_command("queue"), book_command("help")))
+    print("%s · Library: %s · Help: %s" % (
+        controls, book_command("library"), book_command("help")))
     if details:
         print("Surfaces: statusline=%s spinner=%s hud=%s" % (
             "on" if surfaces["statusline"] else "off",
@@ -1021,7 +1044,7 @@ def cmd_dashboard(args):
             "on" if config["hud"] else "off",
         ))
         if len(entries) > 1:
-            print("Queue:")
+            print("Library:")
             for entry in entries:
                 marker = "->" if entry["active"] else "  "
                 print("  %d. %s %s" % (entry["number"], marker, entry["title"]))
@@ -1040,7 +1063,7 @@ def _turn(steps):
     if steps and position == before:
         title = _display_title(current[1], current[3]) if current else "the library"
         print("%s of %s. Use %s to switch books." %
-              ("End" if steps > 0 else "Beginning", title, book_command("queue")))
+              ("End" if steps > 0 else "Beginning", title, book_command("library")))
     elif previous and current and previous[1] != current[1]:
         print("Book: %s\n%s" % (_display_title(current[1], current[3]), line))
     else:
@@ -1080,26 +1103,33 @@ def cmd_status(_args):
 
 def cmd_queue(args):
     action = args[0] if args else "list"
+    if action == "remove":
+        action = "rm"
     if action == "list":
         entries = _queue_entries()
         queue_ids = tbstate.load_queue()["items"]
         indexed_ids = {entry["id"] for entry in entries}
         unavailable = [item_id for item_id in queue_ids if item_id not in indexed_ids]
         if not entries and not unavailable:
-            print("Queue is empty.")
+            print("Library is empty.")
+            print("Add: %s" % book_command("<title|url|file>"))
         for entry in entries:
-            marker = "->" if entry["active"] else "  "
-            print("%d. %s %s [%d/%d] (%s)" % (
+            marker = "📖" if entry["active"] else "  "
+            percent = (entry["offset"] * 100) // max(1, entry["length"])
+            print("%d. %s %s — %d/%d (%d%%)" % (
                 entry["number"], marker, entry["title"], entry["offset"],
-                entry["length"], entry["kind"]))
+                entry["length"], percent))
         for item_id in unavailable:
             print("! %s (unavailable; remove with %s)" % (
-                item_id, book_command("queue rm %s" % item_id)))
+                item_id, book_command("library remove %s" % item_id)))
+        if entries:
+            print("Open: %s · Remove: %s" % (
+                book_command("open 1"), book_command("library remove 1")))
         return
 
     if action not in ("clear", "rm") or (action == "rm" and len(args) < 2):
         raise SystemExit("usage: %s" % book_command(
-            "queue [list|rm <number-or-title>|clear]"))
+            "library [remove <number-or-title>|clear]"))
 
     removed_title = None
     removed_count = 0
@@ -1128,13 +1158,13 @@ def cmd_queue(args):
     if action == "rm":
         now = tbstate.item_at(tbstate.read_pos())
         if not now:
-            suffix = " Queue is empty."
+            suffix = " Library is empty."
         else:
             verb = "Now" if removed_active else "Still"
             suffix = " %s reading %s." % (verb, _display_title(now[1], now[3]))
         print("Removed %s.%s" % (removed_title, suffix))
     else:
-        print("Removed %d queued item%s." %
+        print("Removed %d library item%s." %
               (removed_count, "" if removed_count == 1 else "s"))
 
 
@@ -1151,22 +1181,39 @@ def cmd_open(args):
         offset = tbstate.load_bookmarks().get(item_id, 1)
         position = tbstate.resolve_position(item_id, offset, rows=rows, total=total)
         if position is None:
-            raise SystemExit("%s is no longer queued; run %s and try again."
-                             % (title, book_command("queue")))
+            raise SystemExit("%s is no longer in your library; run %s and try again."
+                             % (title, book_command("library")))
         tbstate.write_pos(position)
         tbstate.write_last_advance()
         resolved = tbstate.locate_position(position, rows=rows, total=total)
         offset = resolved[1] if resolved else 1
         tbstate.save_bookmark(item_id, offset)
-    line = sync_spinner()
-    print("Opened %s at line %d: %s" % (title, offset, line or "(blank)"))
+    config = tbstate.load_config()
+    line = sync_spinner(config)
+    percent = (offset * 100) // max(1, selected["length"])
+    if os.environ.get("THINKING_BOOK_COMMAND") in ("book", "tb"):
+        print("Opened %s at %d/%d (%d%%): %s" % (
+            title, offset, selected["length"], percent, line or "(blank)"))
+        return
+    surfaces = config["surfaces"]
+    if surfaces["statusline"]:
+        message = "Read at 📖 below the input box."
+    elif surfaces["spinner"]:
+        message = "%s (live spinner)." % (line or "(blank)")
+    else:
+        message = "Reading is off — %s." % book_command("on")
+    print("Opened %s · %d/%d (%d%%). %s" % (
+        title, offset, selected["length"], percent, message))
 
 
 def cmd_mode(args):
     if not args or args[0] not in tbstate.VALID_MODES:
         raise SystemExit("usage: %s" % book_command(
             "mode %s" % "|".join(tbstate.VALID_MODES)))
+    _clear_stop_suppression()
     tbstate.update_config(lambda config: config.update({"mode": args[0]}))
+    if args[0] == "timer":
+        tbstate.write_last_advance()
     print("Advance mode: %s" % args[0])
 
 
@@ -1177,6 +1224,8 @@ def cmd_pace(args):
         with tbstate.rebuilding_stream():
             pass
     config = tbstate.update_config(lambda live: live.update({"words_per_minute": wpm}))
+    if config["mode"] == "timer":
+        tbstate.write_last_advance()
     message = "Timer pace: %d words per minute." % wpm
     if config["mode"] != "timer":
         message += " Timer mode is off -- run %s to use it." % book_command("mode timer")
@@ -1189,12 +1238,19 @@ def cmd_dwell(args):
     config = tbstate.update_config(lambda live: live.update({
         "dwell_seconds": seconds, "words_per_minute": None,
     }))
-    print("Timer mode will turn the page every %d seconds." % config["dwell_seconds"])
+    if config["mode"] == "timer":
+        tbstate.write_last_advance()
+    message = "Timer interval: %d seconds." % config["dwell_seconds"]
+    if config["mode"] != "timer":
+        message += " Timer mode is off -- run %s to use it." % book_command("mode timer")
+    print(message)
 
 
 def cmd_pause(_args):
-    tbstate.update_config(lambda config: config.update({"paused": True}))
-    print("Paused on: %s" % (current_line() or "(nothing queued)"))
+    _clear_stop_suppression()
+    config = tbstate.update_config(lambda live: live.update({"paused": True}))
+    line = sync_spinner(config)
+    print("Paused on: %s" % (line or "(nothing queued)"))
 
 
 def cmd_resume(_args):
@@ -1386,8 +1442,7 @@ def cmd_install_cli(args):
     path_entries = [os.path.abspath(os.path.expanduser(p))
                     for p in os.environ.get("PATH", "").split(os.pathsep) if p]
     if target_dir not in path_entries:
-        print("Note: %s is not on your PATH. Add it, or symlink book somewhere that is."
-              % target_dir)
+        print("Use `%s next` now, or add %s to PATH." % (link, target_dir))
     else:
         print("Use `book next`, `book back`, or `book reader` in another terminal.")
 
@@ -1403,7 +1458,7 @@ def print_help():
           % book_command("<title|url|file>"))
     print("Pace: pace <wpm> · mode timer|turn|manual · dwell <seconds>")
     print("Display: display hud|line|spinner|off · surfaces: on|off")
-    print("Library: queue · open <number|title> · add <title|url|file>")
+    print("Library: library · open <number|title> · add <title|url|file>")
     print("More: reader · feed · install-cli · repair · version")
 
 
@@ -1563,7 +1618,8 @@ COMMANDS = {
     "add": cmd_add, "start": cmd_start, "load": cmd_load,
     "gutenberg": cmd_gutenberg, "libby": cmd_libby,
     "clippings": cmd_clippings, "readwise": cmd_readwise, "read": cmd_read,
-    "feed": cmd_feed, "queue": cmd_queue, "open": cmd_open, "status": cmd_status, "mode": cmd_mode,
+    "feed": cmd_feed, "library": cmd_queue, "queue": cmd_queue,
+    "open": cmd_open, "status": cmd_status, "mode": cmd_mode,
     "pace": cmd_pace, "dwell": cmd_dwell, "pause": cmd_pause, "resume": cmd_resume, "pane": cmd_pane,
     "on": cmd_on, "off": cmd_off, "next": cmd_next, "back": cmd_back,
     "line": cmd_line, "recap": cmd_recap,

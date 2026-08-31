@@ -302,6 +302,9 @@ class HookTest(IsolatedStateCase):
         self.run_stop(env=env)
 
         self.assertTrue(os.path.exists(marker))
+        self.run_stop()
+        with open(self.tbstate.path("spinner.cursor")) as fh:
+            self.assertEqual(len(fh.read().split()), 3)
 
     def test_posix_stop_is_silent_and_nonfatal_with_corrupt_control_state(self):
         self.seed_stream(["one"], mode="manual")
@@ -314,6 +317,73 @@ class HookTest(IsolatedStateCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
         self.assertTrue(os.path.exists(marker))
+
+    def test_manual_next_cannot_leave_a_stale_turn_suppression_marker(self):
+        self.seed_stream(["one", "two", "three"], mode="manual")
+        env = {"CLAUDE_CODE_SESSION_ID": "manual-then-turn"}
+        self.run_cli("sync", "--quiet", env=env)
+
+        self.run_cli("next", env=env)
+        self.run_stop(env=env)
+        self.run_cli("mode", "turn", env=env)
+        self.run_stop(env=env)
+
+        self.assertEqual(self.pos(), 3)
+
+    def test_empty_library_stop_never_starts_python(self):
+        self.run_cli("sync", "--quiet")
+        marker, env = self._fake_python_env()
+
+        result = self.run_stop(env=env)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(os.path.exists(marker))
+
+    def test_paused_turn_mode_stop_never_starts_python(self):
+        self.seed_stream(["one", "two"], mode="turn")
+        self.run_cli("pause")
+        self.run_cli("sync", "--quiet")
+        marker, env = self._fake_python_env()
+
+        self.run_stop(env=env)
+
+        self.assertFalse(os.path.exists(marker))
+
+    def test_old_two_field_spinner_cursor_safely_falls_back_once(self):
+        self.seed_stream(["one"], mode="manual")
+        self.run_cli("sync", "--quiet")
+        generation = self.tbstate.stream_generation()
+        self.tbstate.atomic_write(
+            self.tbstate.path("spinner.cursor"), "%s 1\n" % generation)
+        marker, env = self._fake_python_env()
+
+        self.run_stop(env=env)
+
+        self.assertTrue(os.path.exists(marker))
+
+    def test_pause_clears_an_unconsumed_explicit_turn_marker(self):
+        self.seed_stream(["one", "two"], mode="turn")
+        env = {"CLAUDE_CODE_SESSION_ID": "pause-after-next"}
+        self.run_cli("next", env=env)
+        marker = self.tbstate.path("stop.skip.pause-after-next")
+        self.assertTrue(os.path.exists(marker))
+
+        self.run_cli("pause", env=env)
+
+        self.assertFalse(os.path.exists(marker))
+
+    def test_mode_change_clears_an_unconsumed_explicit_turn_marker(self):
+        self.seed_stream(["one", "two"], mode="turn")
+        env = {"CLAUDE_CODE_SESSION_ID": "mode-after-next"}
+        self.run_cli("next", env=env)
+        marker = self.tbstate.path("stop.skip.mode-after-next")
+        self.assertTrue(os.path.exists(marker))
+
+        self.run_cli("mode", "manual", env=env)
+
+        self.assertFalse(os.path.exists(marker))
 
     # ------------------------------------------------------------------------ paused
 

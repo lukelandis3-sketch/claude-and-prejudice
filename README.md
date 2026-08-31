@@ -65,10 +65,10 @@ so on. That is a lot of keystrokes for a page turn — see *A real `/n`* below.
 | `/thinking-book:book recap [n]` | Show the recent passages ending at your current line |
 | `/thinking-book:setup <book>` | Reset reading to HUD, spinner, and 250 WPM defaults |
 | `/thinking-book:book` | Compact reading dashboard and controls |
-| `/thinking-book:book status` | Dashboard plus display details and the whole queue |
-| `/thinking-book:book queue` | A numbered library with each book's bookmark |
+| `/thinking-book:book status` | Dashboard plus display details and the whole library |
+| `/thinking-book:book library` | Every book, its bookmark, and reading progress |
 | `/thinking-book:book open <number-or-title>` | Switch books; each one keeps its own bookmark |
-| `/thinking-book:book queue rm <number-or-title>` | Remove a book and continue at the next one |
+| `/thinking-book:book library remove <number-or-title>` | Remove a book and continue at the next one |
 | `/thinking-book:book mode timer\|turn\|manual` | How pages turn (below) |
 | `/thinking-book:book pace <wpm>` | Set the timer's reading speed (default 250 WPM) |
 | `/thinking-book:book pause` / `/thinking-book:book resume` | Freeze on a line, or carry on |
@@ -191,11 +191,12 @@ start a new book through setup.
 | Command | Source | Gives you |
 |---|---|---|
 | `/thinking-book:book <title\|url\|file>` | Auto-detected source | Books, articles, or highlights, opened immediately |
-| `/thinking-book:book add <title\|url\|file>` | Auto-detected source | Books, articles, or highlights, queued for later |
-| `/thinking-book:book feed add <url>` | An RSS or Atom feed | New articles, queued automatically |
+| `/thinking-book:book add <title\|url\|file>` | Auto-detected source | Books, articles, or highlights, added for later |
+| `/thinking-book:book feed add <url>` | An RSS or Atom feed | New articles, added automatically |
 
-Items form a queue and are read in order; when one runs out the next begins. Feeds top the
-queue up at session start, in the background, at most three new articles per feed per hour.
+Books form a library and are read in order; when one runs out the next begins. `queue`
+remains an alias for existing shortcuts. Feeds add at most three new articles per feed per
+hour in the background at session start.
 
 ### About Kindle and Libby
 
