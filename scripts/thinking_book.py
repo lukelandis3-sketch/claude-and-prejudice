@@ -63,11 +63,35 @@ def statusline_command():
     return 'sh "%s"' % os.path.join(plugin_root(), "scripts", "statusline.sh")
 
 
-def statusline_live_path():
+def _session_id():
     session_id = os.environ.get("CLAUDE_CODE_SESSION_ID") or "global"
     if len(session_id) > 64 or not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
         session_id = "global"
-    return tbstate.path("statusline.live." + session_id)
+    return session_id
+
+
+def statusline_live_path():
+    return tbstate.path("statusline.live." + _session_id())
+
+
+def stop_suppression_path():
+    return tbstate.path("stop.skip." + _session_id())
+
+
+def _mark_following_stop_consumed():
+    """An explicit page command already used this response's turn-mode advance."""
+    if not os.environ.get("CLAUDE_CODE_SESSION_ID"):
+        return
+    tbstate.atomic_write(stop_suppression_path(), "1\n")
+
+
+def _consume_stop_suppression():
+    marker = stop_suppression_path()
+    try:
+        os.unlink(marker)
+        return True
+    except OSError:
+        return False
 
 
 def prune_statusline_markers(now=None):
@@ -95,10 +119,22 @@ def current_line():
 def sync_spinner(config=None):
     """Point spinnerVerbs at the line we are currently on."""
     config = config or tbstate.load_config()
-    line = current_line()
+    cursor = tbstate.path("spinner.cursor")
+    try:
+        os.unlink(cursor)
+    except OSError:
+        pass
+    generation = tbstate.stream_generation() or "none"
+    position = tbstate.read_pos()
+    line = tbstate.stream_line(position)
     if config["surfaces"]["spinner"]:
         prefix = config.get("prefix") or ""
         tbsettings.set_spinner_line((prefix + line) if line else "")
+        # Only certify the cheap Stop path if the immutable stream pointer and cursor
+        # stayed stable while settings.json was updated.
+        if ((tbstate.stream_generation() or "none") == generation
+                and tbstate.read_pos() == position):
+            tbstate.atomic_write(cursor, "%s %d\n" % (generation, position))
     return line
 
 
@@ -1028,10 +1064,14 @@ def _page_count(args, command):
 
 def cmd_next(args):
     _turn(_page_count(args, "next"))
+    if tbstate.stream_count():
+        _mark_following_stop_consumed()
 
 
 def cmd_back(args):
     _turn(-_page_count(args, "back"))
+    if tbstate.stream_count():
+        _mark_following_stop_consumed()
 
 
 def cmd_status(_args):
@@ -1445,6 +1485,10 @@ def cmd_sync(args):
         os.unlink(statusline_live_path())
     except OSError:
         pass
+    try:
+        os.unlink(stop_suppression_path())
+    except OSError:
+        pass
     prune_statusline_markers()
     config = tbstate.load_config()
     try:
@@ -1480,6 +1524,10 @@ def cmd_advance(args):
     the dwell check itself.
     """
     config = tbstate.load_config()
+    if _consume_stop_suppression():
+        line = sync_spinner(config)
+        _report(args, line or "Nothing queued.")
+        return
     if config["paused"] or tbstate.stream_count() == 0:
         line = sync_spinner(config)
         _report(args, line or "Nothing queued.")
@@ -1503,6 +1551,10 @@ def cmd_advance(args):
 
 def cmd_restore(args):
     """SessionEnd: do not leave a stale line in settings for non-plugin sessions."""
+    try:
+        os.unlink(stop_suppression_path())
+    except OSError:
+        pass
     tbsettings.clear_spinner(session_only=True)
     _report(args, "Spinner override removed.")
 
@@ -1533,7 +1585,6 @@ def _normalise_argv(argv):
     The quoting matters: an unquoted $ARGUMENTS let a pasted newline reach the shell,
     which then tried to execute the next line as a program.
     """
-    import shlex
     if len(argv) == 1 and any(ch.isspace() for ch in argv[0]):
         blob = argv[0].strip()
         lines = blob.splitlines()
@@ -1550,6 +1601,7 @@ def _normalise_argv(argv):
             return ([_one_argument(first)] if first else []) + [
                 line.strip() for line in lines[1:] if line.strip()]
         try:
+            import shlex
             argv = shlex.split(argv[0])
         except ValueError:
             argv = argv[0].split()

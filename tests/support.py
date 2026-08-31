@@ -12,6 +12,7 @@ SCRIPTS = os.path.join(REPO, "scripts")
 SOURCES = os.path.join(SCRIPTS, "sources")
 CLI = os.path.join(SCRIPTS, "thinking_book.py")
 STATUSLINE = os.path.join(SCRIPTS, "statusline.sh")
+STOP = os.path.join(SCRIPTS, "stop.sh")
 
 for candidate in (SCRIPTS, SOURCES):
     if candidate not in sys.path:
@@ -134,6 +135,16 @@ class IsolatedStateCase(unittest.TestCase):
         return subprocess.run(
             ["sh", STATUSLINE],
             input=stdin_json, capture_output=True, text=True,
+            env=environment, timeout=30,
+        )
+
+    def run_stop(self, env=None):
+        environment = dict(os.environ)
+        environment["CLAUDE_CONFIG_DIR"] = self.config_dir
+        environment["CLAUDE_PLUGIN_ROOT"] = REPO
+        environment.update(env or {})
+        return subprocess.run(
+            ["sh", STOP, CLI], capture_output=True, text=True,
             env=environment, timeout=30,
         )
 

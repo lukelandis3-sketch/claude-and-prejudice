@@ -951,22 +951,22 @@ class RoundTripTest(IsolatedStateCase):
         self.assertTrue(self.tbstate.load_config()["paused"])
         self.assertIn("/thinking-book:book resume", result.stdout)
 
-    def test_turn_reads_the_current_line_once(self):
+    def test_turn_reads_the_current_stream_record_once(self):
         import thinking_book
         self.seed_stream(["one", "two"], mode="manual")
         calls = []
-        original = thinking_book.current_line
+        original = self.tbstate.stream_line
 
-        def counted():
-            calls.append(True)
-            return original()
+        def counted(position):
+            calls.append(position)
+            return original(position)
 
-        thinking_book.current_line = counted
+        self.tbstate.stream_line = counted
         try:
             with contextlib.redirect_stdout(io.StringIO()):
                 thinking_book.cmd_next([])
         finally:
-            thinking_book.current_line = original
+            self.tbstate.stream_line = original
         self.assertEqual(len(calls), 1)
 
     def test_open_parses_the_stream_index_once(self):

@@ -151,6 +151,27 @@ class HookTest(IsolatedStateCase):
         self.assertEqual(self.pos(), 1)
         self.assertEqual(self.spinner_line(), "only line")
 
+    def test_explicit_next_consumes_the_following_turn_mode_stop(self):
+        self.seed_stream(["one", "two", "three"], mode="turn")
+        env = {"CLAUDE_CODE_SESSION_ID": "session-next"}
+
+        self.run_cli("next", env=env)
+        self.run_cli("advance", "--quiet", env=env)
+
+        self.assertEqual(self.pos(), 2)
+        self.assertEqual(self.spinner_line(), "two")
+
+    def test_explicit_back_consumes_the_following_turn_mode_stop(self):
+        self.seed_stream(["one", "two", "three"], mode="turn")
+        self.tbstate.write_pos(3)
+        env = {"CLAUDE_CODE_SESSION_ID": "session-back"}
+
+        self.run_cli("back", env=env)
+        self.run_cli("advance", "--quiet", env=env)
+
+        self.assertEqual(self.pos(), 2)
+        self.assertEqual(self.spinner_line(), "two")
+
     # ------------------------------------------------------------------ Stop: manual
 
     def test_manual_mode_never_advances_on_stop(self):
@@ -224,6 +245,75 @@ class HookTest(IsolatedStateCase):
         self.tbstate.write_last_advance(time.time())
         self.run_cli("advance")
         self.assertEqual(self.pos(), 1)
+
+    # ---------------------------------------------------------- POSIX dispatcher
+
+    def _fake_python_env(self):
+        fake_bin = os.path.join(self.config_dir, "fake-bin")
+        os.makedirs(fake_bin, exist_ok=True)
+        marker = os.path.join(self.config_dir, "python-ran")
+        fake_python = os.path.join(fake_bin, "python3")
+        with open(fake_python, "w") as fh:
+            fh.write("#!/bin/sh\n: > \"$CLAUDE_CONFIG_DIR/python-ran\"\nexit 9\n")
+        os.chmod(fake_python, 0o755)
+        return marker, {"PATH": fake_bin + os.pathsep + os.environ["PATH"]}
+
+    def test_posix_stop_skips_python_for_clean_manual_state(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        self.run_cli("sync", "--quiet")
+        marker, env = self._fake_python_env()
+
+        result = self.run_stop(env=env)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertFalse(os.path.exists(marker))
+
+    def test_posix_stop_skips_python_when_live_timer_and_spinner_are_current(self):
+        self.seed_stream(["one", "two"], mode="timer", dwell=600)
+        self.run_cli("sync", "--quiet")
+        self.run_statusline()
+        marker, env = self._fake_python_env()
+
+        result = self.run_stop(env=env)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertFalse(os.path.exists(marker))
+
+    def test_posix_stop_falls_back_for_turn_mode(self):
+        self.seed_stream(["one", "two"], mode="turn")
+        self.run_cli("sync", "--quiet")
+        marker, env = self._fake_python_env()
+
+        result = self.run_stop(env=env)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertTrue(os.path.exists(marker))
+
+    def test_posix_stop_falls_back_when_spinner_cursor_is_dirty(self):
+        self.seed_stream(["one", "two"], mode="manual")
+        self.run_cli("sync", "--quiet")
+        self.tbstate.write_pos(2)
+        marker, env = self._fake_python_env()
+
+        self.run_stop(env=env)
+
+        self.assertTrue(os.path.exists(marker))
+
+    def test_posix_stop_is_silent_and_nonfatal_with_corrupt_control_state(self):
+        self.seed_stream(["one"], mode="manual")
+        self.tbstate.atomic_write(self.tbstate.path("stop.control"), "exit 42\n")
+        marker, env = self._fake_python_env()
+
+        result = self.run_stop(env=env)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        self.assertTrue(os.path.exists(marker))
 
     # ------------------------------------------------------------------------ paused
 

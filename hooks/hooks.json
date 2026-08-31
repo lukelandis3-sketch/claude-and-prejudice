@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/thinking_book.py\" advance --quiet",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/scripts/stop.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/thinking_book.py\"",
             "timeout": 10
           }
         ]

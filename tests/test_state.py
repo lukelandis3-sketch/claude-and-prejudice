@@ -157,6 +157,16 @@ class ConfigTest(IsolatedStateCase):
         self.assertEqual(config["dwell_seconds"], 8)
         self.assertTrue(config["surfaces"]["spinner"])
 
+    def test_saved_config_writes_fixed_field_stop_control(self):
+        config = self.tbstate.load_config()
+        config.update({"mode": "manual", "paused": True})
+        config["surfaces"] = {"statusline": False, "spinner": True}
+
+        self.tbstate.save_config(config)
+
+        with open(self.tbstate.path("stop.control")) as fh:
+            self.assertEqual(fh.read(), "manual 1 0 1\n")
+
     def test_invalid_values_fall_back_to_defaults(self):
         self.tbstate.write_json(
             self.tbstate.path("config.json"), {"mode": "nonsense", "dwell_seconds": "abc"}

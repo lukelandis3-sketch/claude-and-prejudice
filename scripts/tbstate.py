@@ -14,8 +14,6 @@ import fcntl
 import json
 import os
 import re
-import shutil
-import tempfile
 import time
 from contextlib import contextmanager
 
@@ -65,6 +63,7 @@ def ensure_home():
 
 def atomic_write(target, text):
     """Write via a temp file in the same directory, then rename. Never a partial file."""
+    import tempfile
     directory = os.path.dirname(target) or "."
     os.makedirs(directory, exist_ok=True)
     handle, tmp = tempfile.mkstemp(dir=directory, prefix=".tb-", suffix=".tmp")
@@ -84,6 +83,7 @@ def atomic_write(target, text):
 
 def atomic_write_bytes(target, data):
     """Binary twin of atomic_write, used when byte-for-byte preservation matters."""
+    import tempfile
     directory = os.path.dirname(target) or "."
     os.makedirs(directory, exist_ok=True)
     handle, tmp = tempfile.mkstemp(dir=directory, prefix=".tb-", suffix=".tmp")
@@ -200,9 +200,24 @@ def write_hot_env(config):
         "TB_HUD=%s" % ("1" if config.get("hud") else "0"),
     ]
     atomic_write(path("hot.env"), "\n".join(lines) + "\n")
+    # The Stop hook needs only four enum/boolean fields. A fixed, non-executable record
+    # lets POSIX sh read them with one builtin instead of sourcing a cache or starting
+    # Python on every assistant response.
+    atomic_write(path("stop.control"), "%s %d %d %d\n" % (
+        config["mode"],
+        1 if config["paused"] else 0,
+        1 if config["surfaces"]["statusline"] else 0,
+        1 if config["surfaces"]["spinner"] else 0,
+    ))
 
 
 def save_config(config):
+    # Until the new derived state and spinner line have both been published, force the
+    # Stop dispatcher through the full correctness path.
+    try:
+        os.unlink(path("spinner.cursor"))
+    except OSError:
+        pass
     write_json(path("config.json"), config)
     write_hot_env(config)
 
@@ -506,6 +521,7 @@ def _publish_stream_generation(lines, hud_rows, index_rows):
                 pass
     for _mtime, obsolete in sorted(generations, reverse=True)[2:]:
         try:
+            import shutil
             shutil.rmtree(obsolete)
         except OSError:
             pass
